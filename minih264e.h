@@ -191,7 +191,7 @@ void H264E_set_vbv_state(
 
 #endif //MINIH264_H
 
-#if defined(MINIH264_IMPLEMENTATION) && !defined(MINIH264_IMPLEMENTATION_GUARD)
+#if !defined(MINIH264_IMPLEMENTATION_GUARD)
 #define MINIH264_IMPLEMENTATION_GUARD
 
 #include <assert.h>
