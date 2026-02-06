@@ -363,7 +363,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    create_param.enableNEON = 1;
     create_param.gop = cmdline->gop;
     create_param.height = g_h;
     create_param.width  = g_w;

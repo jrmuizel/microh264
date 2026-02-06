@@ -69,8 +69,6 @@ typedef struct H264E_create_param_tag
     // If not set: use input as a scratch
     int const_input_flag;
 
-    int enableNEON;
-
     int sps_id;
 
 } H264E_create_param_t;
@@ -1953,9 +1951,6 @@ static void h264e_copy_borders(unsigned char *pic, int w, int h, int guard)
     }
 }
 
-#undef TRANSPOSE_BLOCK
-#define TRANSPOSE_BLOCK     1
-#define UNZIGSAG_IN_QUANT   0
 #define SUM_DIF(a, b) { int t = a + b; b = a - b; a = t; }
 
 static int clip_byte(int x)
@@ -2011,18 +2006,6 @@ static void dequant_dc(quant_t *q, int16_t *qval, int dequant, int n)
 
 static void quant_dc(int16_t *qval, int16_t *deq, int16_t quant, int n, int round_q18)
 {
-#if UNZIGSAG_IN_QUANT
-    int r_minus =  (1 << 18) - round_q18;
-    static const uint8_t iscan16[16] = {0, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 10, 14, 15};
-    static const uint8_t iscan4[4] = {0, 1, 2, 3};
-    const uint8_t *scan = n == 4 ? iscan4 : iscan16;
-    do
-    {
-        int v = *qval;
-        int r = v < 0 ? r_minus : round_q18;
-        deq[*scan++] = *qval++ = (v * quant + r) >> 18;
-    } while (--n);
-#else
     int r_minus =  (1<<18) - round_q18;
     do
     {
@@ -2030,7 +2013,6 @@ static void quant_dc(int16_t *qval, int16_t *deq, int16_t quant, int n, int roun
         int r = v < 0 ? r_minus : round_q18;
         *deq++ = *qval++ = (v * quant + r) >> 18;
     } while (--n);
-#endif
 }
 
 static void hadamar2_2d(int16_t *x)
@@ -2092,7 +2074,6 @@ static void FwdTransformResidual4x42(const uint8_t *inp, const uint8_t *pred,
     int i;
     int16_t tmp[16];
 
-#if TRANSPOSE_BLOCK
     // Transform columns
     for (i = 0; i < 4; i++, pred++, inp++)
     {
@@ -2111,30 +2092,6 @@ static void FwdTransformResidual4x42(const uint8_t *inp, const uint8_t *pred,
         int d3 = tmp[i + 12];
         TRANSFORM(d0, d1, d2, d3, out + i, 4);
     }
-
-#else
-    /* Transform rows */
-    for (i = 0; i < 16; i += 4)
-    {
-        int d0 = inp[0] - pred[0];
-        int d1 = inp[1] - pred[1];
-        int d2 = inp[2] - pred[2];
-        int d3 = inp[3] - pred[3];
-        TRANSFORM(d0, d1, d2, d3, tmp + i, 1);
-        pred += 16;
-        inp += inp_stride;
-    }
-
-    /* Transform columns */
-    for (i = 0; i < 4; i++)
-    {
-        int f0 = tmp[i + 0];
-        int f1 = tmp[i + 4];
-        int f2 = tmp[i + 8];
-        int f3 = tmp[i + 12];
-        TRANSFORM(f0, f1, f2, f3, out + i, 4);
-    }
-#endif
 }
 
 static void TransformResidual4x4(int16_t *pSrc)
@@ -2145,17 +2102,10 @@ static void TransformResidual4x4(int16_t *pSrc)
     /* Transform rows */
     for (i = 0; i < 16; i += 4)
     {
-#if TRANSPOSE_BLOCK
         int d0 = pSrc[(i >> 2) + 0];
         int d1 = pSrc[(i >> 2) + 4];
         int d2 = pSrc[(i >> 2) + 8];
         int d3 = pSrc[(i >> 2) + 12];
-#else
-        int d0 = pSrc[i + 0];
-        int d1 = pSrc[i + 1];
-        int d2 = pSrc[i + 2];
-        int d3 = pSrc[i + 3];
-#endif
         int e0 = d0 + d2;
         int e1 = d0 - d2;
         int e2 = (d1 >> 1) - d3;
@@ -2239,18 +2189,6 @@ static int zero_smallq(quant_t *q, int mode, const uint16_t *qdat)
 
 static int quantize(quant_t *q, int mode, const uint16_t *qdat, int zmask)
 {
-#if UNZIGSAG_IN_QUANT
-#if TRANSPOSE_BLOCK
-    // ; Zig-zag scan      Transposed zig-zag
-    // ;    0 1 5 6        0 2 3 9
-    // ;    2 4 7 C        1 4 8 A
-    // ;    3 8 B D        5 7 B E
-    // ;    9 A E F        6 C D F
-    static const unsigned char iscan16[16] = { 0, 2, 3, 9, 1, 4, 8, 10, 5, 7, 11, 14, 6, 12, 13, 15 };
-#else
-    static const unsigned char iscan16[16] = { 0, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 10, 14, 15 };
-#endif
-#endif
     int i, i0 = mode & 1, ccol, crow;
     int nz_block_mask = 0;
     ccol = mode >> 1;
@@ -2276,15 +2214,9 @@ static int quantize(quant_t *q, int mode, const uint16_t *qdat, int zmask)
                     if (q->dq[i] < 0) round = 0xFFFF - round;
 
                     v = (q->dq[i]*qdat[off] + round) >> 16;
-#if UNZIGSAG_IN_QUANT
-                    if (v)
-                        nz_mask |= 1 << iscan16[i];
-                    q->qv[iscan16[i]] = (int16_t)v;
-#else
                     if (v)
                         nz_mask |= 1 << i;
                     q->qv[i] = (int16_t)v;
-#endif
                     q->dq[i] = (int16_t)(v*qdat[off + 1]);
                 }
             }
@@ -2721,8 +2653,6 @@ loop_enter:
 /************************************************************************/
 #define ALPHA_OFS       0       // Deblock alpha offset
 #define BETA_OFS        0       // Deblock beta offset
-#define DQP_CHROMA      0       // chroma delta QP
-
 #define MV_RANGE        32      // Motion vector search range, pixels
 #define MV_GUARD        14      // Out-of-frame MV's restriction, pixels
 
@@ -2839,10 +2769,9 @@ H264E_API(int,  h264e_quant_chroma_dc, (quant_t *q, int16_t *deq, const uint16_t
 /************************************************************************/
 
 
-static void init_vft(int enableNEON)
+static void init_vft(void)
 {
     g_vft = &g_vft_plain_c;
-    (void)enableNEON;
 }
 
 #define MAP_NAME(name) g_vft->name
@@ -3595,9 +3524,6 @@ static void encode_sps(h264e_enc_t *enc)
     UE(((enc->param.width + 15) >> 4) - 1);     // pic_width_in_mbs_minus1
     UE(((enc->param.height + 15) >> 4) - 1);    // pic_height_in_map_units_minus1
     U(3, 6 + enc->frame.cropping_flag);         // frame_mbs_only_flag|direct_8x8_inference_flag|frame_cropping_flag
-//    U1(1);  // frame_mbs_only_flag
-//    U1(1);  // direct_8x8_inference_flag
-//    U1(frame_cropping_flag);  // frame_cropping_flag
     if (enc->frame.cropping_flag)
     {
         UE(0);                                          // frame_crop_left_offset
@@ -3628,20 +3554,12 @@ static void encode_pps(h264e_enc_t *enc, int pps_id)
     U1(0);  // weighted_pred_flag           0
     U(2,0); // weighted_bipred_idc          00
     SE(enc->sps.pic_init_qp - 26);  // pic_init_qp_minus26
-#if DQP_CHROMA
-    SE(0);  // pic_init_qs_minus26                    1
-    SE(DQP_CHROMA);  // chroma_qp_index_offset        1
-    U1(1);  // deblocking_filter_control_present_flag 1
-    U1(0);  // constrained_intra_pred_flag            0
-    U1(0);  // redundant_pic_cnt_present_flag         0
-#else
     U(5, 0x1C);         // constant shortcut:
-//     SE(0);  // pic_init_qs_minus26                    1
-//     SE(0);  // chroma_qp_index_offset                 1
-//     U1(1);  // deblocking_filter_control_present_flag 1
-//     U1(0);  // constrained_intra_pred_flag            0
-//     U1(0);  // redundant_pic_cnt_present_flag         0
-#endif
+    // SE(0);  pic_init_qs_minus26
+    // SE(0);  chroma_qp_index_offset
+    // U1(1);  deblocking_filter_control_present_flag
+    // U1(0);  constrained_intra_pred_flag
+    // U1(0);  redundant_pic_cnt_present_flag
     nal_end(enc);
 }
 
@@ -3704,8 +3622,7 @@ static void mb_write(h264e_enc_t *enc)
 {
     int i, uv, mb_type, cbpc, cbpl, cbp;
     scratch_t *qv = enc->scratch;
-    int mb_type_svc = enc->mb.type;
-    int intra16x16_flag = mb_type_svc >= 6;
+    int intra16x16_flag = enc->mb.type >= 6;
     uint8_t nz[9];
     uint8_t *nnz_top = enc->nnz + 8 + enc->mb.x*8;
     uint8_t *nnz_left = enc->nnz;
@@ -3823,7 +3740,7 @@ l_skip:
         }
 
         mb_type = enc->mb.type;
-        if (mb_type_svc >= 6)   // intra 16x16
+        if (enc->mb.type >= 6)   // intra 16x16
         {
             if (cbpl)
             {
@@ -3877,7 +3794,7 @@ l_skip:
             }
         }
         cbp = cbpl + (cbpc << 4);
-        if (mb_type_svc < 6)
+        if (enc->mb.type < 6)
         {
             // encode cbp 9.1.2 Mapping process for coded block pattern
             static const uint8_t cbp2code[2][48] = {
@@ -3886,10 +3803,10 @@ l_skip:
                 {0,  2,  3,  7,  4,  8, 17, 13,  5, 18,  9, 14, 10, 15, 16, 11,  1, 32, 33, 36, 34, 37, 44, 40,
                 35, 45, 38, 41, 39, 42, 43, 19,  6, 24, 25, 20, 26, 21, 46, 28, 27, 47, 22, 29, 23, 30, 31, 12}
             };
-            UE(cbp2code[mb_type_svc < 5][cbp]);
+            UE(cbp2code[enc->mb.type < 5][cbp]);
         }
 
-        if (cbp || (mb_type_svc >= 6))
+        if (cbp || (enc->mb.type >= 6))
         {
             SE(enc->rc.qp - enc->rc.prev_qp);
             enc->rc.prev_qp = enc->rc.qp;
@@ -4840,9 +4757,9 @@ static void mb_deblock(deblock_filter_t *df, int mb_type, int qp_this, int mbx, 
         }
         h264e_deblock_luma(mbyuv->yuv[0], mbyuv->stride[0], &par);
 
-        qp_this = qpy2qpc[qp_this + DQP_CHROMA];
-        qp_left = qpy2qpc[qp_left + DQP_CHROMA];
-        qp_top = qpy2qpc[qp_top + DQP_CHROMA];
+        qp_this = qpy2qpc[qp_this];
+        qp_left = qpy2qpc[qp_left];
+        qp_top = qpy2qpc[qp_top];
         cr++;
     }
 }
@@ -5009,7 +4926,7 @@ static void rc_set_qp(h264e_enc_t *enc, int qp)
             qdat[4] = qdat[6] = qdat0[3];
             qdat[5] = qdat[7] = qdat0[5];
 
-            qp = qpy2qpc[qp + DQP_CHROMA];
+            qp = qpy2qpc[qp];
         } while (--cloop);
     }
 }
@@ -5288,7 +5205,7 @@ static int H264E_init_one(h264e_enc_t *enc, const H264E_create_param_t *opt, int
 {
     pix_t *base;
 #if H264E_CONFIGS_COUNT > 1
-    init_vft(opt->enableNEON);
+    init_vft();
 #endif
     memset(enc, 0, sizeof(*enc));
 
