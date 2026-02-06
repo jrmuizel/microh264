@@ -245,58 +245,6 @@ void H264E_set_vbv_state(
 #error platform not supported
 #endif
 
-#if defined(__aarch64__) && defined(__clang__)
-// uintptr_t broken with aarch64 clang on ubuntu 18
-#define uintptr_t unsigned long
-#endif
-#if defined(__arm__) && defined(__clang__)
-#include <arm_acle.h>
-#elif defined(__arm__) && defined(__GNUC__) && !defined(__ARMCC_VERSION)
-static inline unsigned int __usad8(unsigned int val1, unsigned int val2)
-{
-    unsigned int result;
-    __asm__ volatile ("usad8 %0, %1, %2\n\t"
-                      : "=r" (result)
-                      : "r" (val1), "r" (val2));
-    return result;
-}
-
-static inline unsigned int __usada8(unsigned int val1, unsigned int val2, unsigned int val3)
-{
-    unsigned int result;
-    __asm__ volatile ("usada8 %0, %1, %2, %3\n\t"
-                      : "=r" (result)
-                      : "r" (val1), "r" (val2), "r" (val3));
-    return result;
-}
-
-static inline unsigned int __sadd16(unsigned int val1, unsigned int val2)
-{
-    unsigned int result;
-    __asm__ volatile ("sadd16 %0, %1, %2\n\t"
-                      : "=r" (result)
-                      : "r" (val1), "r" (val2));
-    return result;
-}
-
-static inline unsigned int __ssub16(unsigned int val1, unsigned int val2)
-{
-    unsigned int result;
-    __asm__ volatile ("ssub16 %0, %1, %2\n\t"
-                      : "=r" (result)
-                      : "r" (val1), "r" (val2));
-    return result;
-}
-
-static inline unsigned int __clz(unsigned int val1)
-{
-    unsigned int result;
-    __asm__ volatile ("clz %0, %1\n\t"
-                      : "=r" (result)
-                      : "r" (val1));
-    return result;
-}
-#endif
 
 #ifdef __cplusplus
 extern "C" {
