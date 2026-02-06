@@ -851,43 +851,20 @@ static uint32_t intra_predict_dc(const pix_t *left, const pix_t *top, int log_si
 #define L2 edge[-4]
 #define L3 edge[-5]
 
-static void h264e_intra_predict_16x16(pix_t *predict,  const pix_t *left, const pix_t *top, int mode)
+static void h264e_intra_predict_16x16(pix_t *predict, const pix_t *left, const pix_t *top)
 {
     int cloop = 16;
     uint32_t *d = (uint32_t*)predict;
+    uint32_t t0;
     assert(IS_ALIGNED(predict, 4));
-    assert(IS_ALIGNED(top, 4));
-    if (mode != 1)
+    t0 = intra_predict_dc(left, top, 4);
+    do
     {
-        uint32_t t0, t1, t2, t3;
-        if (mode < 1)
-        {
-            t0 = ((uint32_t*)top)[0];
-            t1 = ((uint32_t*)top)[1];
-            t2 = ((uint32_t*)top)[2];
-            t3 = ((uint32_t*)top)[3];
-        } else //(mode == 2)
-        {
-            t0 = t1 = t2 = t3 = intra_predict_dc(left, top, 4);
-        }
-        do
-        {
-            *d++ = t0;
-            *d++ = t1;
-            *d++ = t2;
-            *d++ = t3;
-        } while (--cloop);
-    } else //if (mode == 1)
-    {
-        do
-        {
-            uint32_t val = *left++ * 0x01010101u;
-            *d++ = val;
-            *d++ = val;
-            *d++ = val;
-            *d++ = val;
-        } while (--cloop);
-    }
+        *d++ = t0;
+        *d++ = t0;
+        *d++ = t0;
+        *d++ = t0;
+    } while (--cloop);
 }
 
 static void h264e_intra_predict_chroma(pix_t *predict, const pix_t *left, const pix_t *top, int mode)
@@ -2860,54 +2837,13 @@ l_skip:
 /**
 *   Choose 16x16 prediction mode, most suitable for given gradient
 */
-static int intra_estimate_16x16(pix_t *p, int s, int avail, int qp)
-{
-    static const uint8_t mode_i16x16_valid[8] = { 4, 5, 6, 7, 4, 5, 6, 15 };
-    pix_t p00 = p[0];
-    pix_t p01 = p[15];
-    pix_t p10 = p[15*s + 0];
-    pix_t p11 = p[15*s + 15];
-    int v = mode_i16x16_valid[avail & (AVAIL_T + AVAIL_L + AVAIL_TL)];
-    // better than above on low bitrates
-    int dx = ABS(p00 - p01) + ABS(p10 - p11) + ABS(p[8*s] - p[8*s + 15]);
-    int dy = ABS(p00 - p10) + ABS(p01 - p11) + ABS(p[8] - p[15*s + 8]);
-
-    if ((dx > 30 + 3*dy && dy < (100 + 50 - qp)
-        //|| (/*dx < 50 &&*/ dy <= 12)
-        ) && (v & 1))
-        return 0;
-    else if (dy > 30 + 3*dx && dx < (100 + 50 - qp) && (v & (1 << 1)))
-        return 1;
-    else
-        return 2;
-}
-
-/**
-*   Estimate cost of 16x16 intra predictor
-*
-*   for foreman@qp10
-*
-*   12928 - [0-3], [0]
-*   12963 - [0-2], [0]
-*   12868 - [0-2], [0-3]
-*   12878 - [0-2], [0-2]
-*   12834 - [0-3], [0-3]
-*sad
-*   13182
-*heuristic
-*   13063
-*
-*/
-static void intra_choose_16x16(h264e_enc_t *enc, pix_t *left, pix_t *top, int avail)
+static void intra_choose_16x16(h264e_enc_t *enc, pix_t *left, pix_t *top)
 {
     int sad, sad4[4];
-    // heuristic mode decision
-    enc->mb.i16.pred_mode_luma = intra_estimate_16x16(enc->scratch->mb_pix_inp, 16, avail, enc->rc.qp);
+    enc->mb.i16.pred_mode_luma = 2; // always DC mode
 
-    // run chosen predictor
-    h264e_intra_predict_16x16(enc->ptest, left, top, enc->mb.i16.pred_mode_luma);
+    h264e_intra_predict_16x16(enc->ptest, left, top);
 
-    // coding cost
     sad = h264e_sad_mb_unlaign_8x8(enc->scratch->mb_pix_inp, 16, enc->ptest, sad4)        // SAD
         + MUL_LAMBDA(bitsize_ue(enc->mb.i16.pred_mode_luma + 1), g_lambda_q4[enc->rc.qp]) // side-info penalty
         + g_lambda_i16_q4[enc->rc.qp];                                                    // block kind penalty
@@ -3361,7 +3297,7 @@ static void mb_encode(h264e_enc_t *enc)
 
     if (enc->mb.type >= 0)
     {
-        intra_choose_16x16(enc, left, top, avail);
+        intra_choose_16x16(enc, left, top);
     }
 
     if (enc->mb.type < 6)
