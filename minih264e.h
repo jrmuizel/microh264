@@ -466,7 +466,6 @@ typedef struct H264E_persist_tag
         int w;                      // Frame width, pixels
         int h;                      // Frame height, pixels
         rectangle_t mv_limit;       // Frame MV limits = frame + border extension
-        rectangle_t mv_qpel_limit;  // Reduced MV limits for qpel interpolation filter
         int cropping_flag;          // Cropping indicator
     } frame;
 
@@ -1008,16 +1007,6 @@ static void h264e_intra_predict_chroma(pix_t *predict, const pix_t *left, const 
             d += 4;
         } while(--ccloop);
     }
-}static uint8_t byteclip(int x)
-{
-    if (x > 255) x = 255;
-    if (x < 0) x = 0;
-    return (uint8_t)x;
-}
-
-static int hpel_lpf(const uint8_t *p, int s)
-{
-    return p[0] - 5*p[s] + 20*p[2*s] + 20*p[3*s] - 5*p[4*s] + p[5*s];
 }
 
 static void copy_wh(const uint8_t *src, int src_stride, uint8_t *dst, int w, int h)
@@ -1031,149 +1020,6 @@ static void copy_wh(const uint8_t *src, int src_stride, uint8_t *dst, int w, int
         }
         dst += 16;
         src += src_stride;
-    }
-}
-
-static void hpel_lpf_diag(const uint8_t *src, int src_stride, uint8_t *h264e_restrict dst, int w, int h)
-{
-    ALIGN(16) int16_t scratch[21 * 16] ALIGN2(16);  /* 21 rows by 16 pixels per row */
-
-    /*
-     * Intermediate values will be 1/2 pel at Horizontal direction
-     * Starting at (0.5, -2) at top extending to (0.5, height + 3) at bottom
-     * scratch contains a 2D array of size (w)X(h + 5)
-     */
-    int y, x;
-    for (y = 0; y < h + 5; y++)
-    {
-        for (x = 0; x < w; x++)
-        {
-            scratch[y * w + x] = (int16_t)hpel_lpf(src + (y - 2) * src_stride + (x - 2), 1);
-        }
-    }
-
-    /* Vertical interpolate */
-    for (y = 0; y < h; y++)
-    {
-        for (x = 0; x < w; x++)
-        {
-            int pos = y * w + x;
-            int HalfCoeff =
-                scratch [pos] -
-                5 * scratch [pos + 1 * w] +
-                20 * scratch [pos + 2 * w] +
-                20 * scratch [pos + 3 * w] -
-                5 * scratch [pos + 4 * w] +
-                scratch [pos + 5 * w];
-
-            HalfCoeff = byteclip((HalfCoeff + 512) >> 10);
-
-            dst [y * 16 + x] = (uint8_t)HalfCoeff;
-        }
-    }
-}
-
-static void hpel_lpf_hor(const uint8_t *src, int src_stride, uint8_t *h264e_restrict dst, int w, int h)
-{
-    int x, y;
-    for (y = 0; y < h; y++)
-    {
-        for (x = 0; x < w; x++)
-        {
-            dst [y * 16 + x] = byteclip((hpel_lpf(src + y * src_stride + (x - 2), 1) + 16) >> 5);
-        }
-    }
-}
-
-static void hpel_lpf_ver(const uint8_t *src, int src_stride, uint8_t *h264e_restrict dst, int w, int h)
-{
-    int y, x;
-    for (y = 0; y < h; y++)
-    {
-        for (x = 0; x < w; x++)
-        {
-            dst [y * 16 + x] = byteclip((hpel_lpf(src + (y - 2) * src_stride + x, src_stride) + 16) >> 5);
-        }
-    }
-}
-
-static void average_16x16_unalign(uint8_t *dst, const uint8_t *src1, int src1_stride)
-{
-    int x, y;
-    for (y = 0; y < 16; y++)
-    {
-        for (x = 0; x < 16; x++)
-        {
-            dst[y * 16 + x] = (uint8_t)(((uint32_t)dst [y * 16 + x] + src1[y*src1_stride + x] + 1) >> 1);
-        }
-    }
-}
-
-static void h264e_qpel_average_wh_align(const uint8_t *src0, const uint8_t *src1, uint8_t *dst, point_t wh)
-{
-    int w = wh.s.x;
-    int h = wh.s.y;
-    int x, y;
-    for (y = 0; y < h; y++)
-    {
-        for (x = 0; x < w; x++)
-        {
-            dst[y * 16 + x] = (uint8_t)((src0[y * 16 + x] + src1[y * 16 + x] + 1) >> 1);
-        }
-    }
-}
-
-static void h264e_qpel_interpolate_luma(const uint8_t *src, int src_stride, uint8_t *h264e_restrict dst, point_t wh, point_t dxdy)
-{
-    ALIGN(16) uint8_t scratch[16*16] ALIGN2(16);
-    //  src += ((dx + 1) >> 2) + ((dy + 1) >> 2)*src_stride;            // dx == 3 ? next row; dy == 3 ? next line
-    //  dxdy              actions: Horizontal, Vertical, Diagonal, Average
-    //  0 1 2 3 +1        -   ha    h    ha+
-    //  1                 va  hva   hda  hv+a
-    //  2                 v   vda   d    v+da
-    //  3                 va+ h+va h+da  h+v+a
-    //  +stride
-    int32_t pos = 1 << (dxdy.s.x + 4*dxdy.s.y);
-    int dstused = 0;
-
-    if (pos == 1)
-    {
-        copy_wh(src, src_stride, dst, wh.s.x, wh.s.y);
-        return;
-    }
-    if (pos & 0xe0ee)// 1110 0000 1110 1110
-    {
-        hpel_lpf_hor(src + ((pos & 0xe000) ? src_stride : 0), src_stride, dst, wh.s.x, wh.s.y);
-        dstused++;
-    }
-    if (pos & 0xbbb0)// 1011 1011 1011 0000
-    {
-        hpel_lpf_ver(src + ((pos & 0x8880) ? 1 : 0), src_stride, dstused ? scratch : dst, wh.s.x, wh.s.y);
-        dstused++;
-    }
-    if (pos & 0x4e40)// 0100 1110 0100 0000
-    {
-        hpel_lpf_diag(src, src_stride, dstused ? scratch : dst, wh.s.x, wh.s.y);
-        dstused++;
-    }
-    if (pos & 0xfafa)// 1111 1010 1111 1010
-    {
-        assert(wh.s.x == 16 && wh.s.y == 16);
-        if (dstused == 2)
-        {
-            point_t p;
-
-            src = scratch;
-            src_stride = 16;
-            p.u32 = 16 + (16<<16);
-
-            h264e_qpel_average_wh_align(src, dst, dst, p);
-            return;
-        } else
-        {
-            src += ((dxdy.s.x + 1) >> 2) + ((dxdy.s.y + 1) >> 2)*src_stride;
-        }
-        average_16x16_unalign(dst, src, src_stride);
     }
 }
 
@@ -3131,13 +2977,12 @@ static void intra_choose_16x16(h264e_enc_t *enc, pix_t *left, pix_t *top, int av
 /************************************************************************/
 
 /**
-*   Sub-pel luma interpolation
+*   Full-pel luma copy (no sub-pel interpolation)
 */
 static void interpolate_luma(const pix_t *ref, int stride, point_t mv, point_t wh, pix_t *dst)
 {
     ref += (mv.s.y >> 2) * stride + (mv.s.x >> 2);
-    mv.u32 &= 0x000030003;
-    h264e_qpel_interpolate_luma(ref, stride, dst, wh, mv);
+    copy_wh(ref, stride, dst, wh.s.x, wh.s.y);
 }
 
 /**
@@ -3183,8 +3028,8 @@ static int me_mv_cost(point_t mv, point_t mv_pred, int qp)
 *   Modified full-pel motion search with small diamond algorithm
 *   note: diamond implemented with small modifications, trading speed for precision
 */
-static int me_search_diamond(h264e_enc_t *enc, const pix_t *ref, const pix_t *b, int rowbytes, point_t *mv,
-    const rectangle_t *range, int qp, point_t mv_pred, int min_sad, point_t wh, pix_t *scratch, pix_t **ppbest, int store_bytes)
+static int me_search_diamond(const pix_t *ref, const pix_t *b, int rowbytes, point_t *mv,
+    const rectangle_t *range, int qp, point_t mv_pred, int min_sad, point_t wh, pix_t *scratch, pix_t **ppbest)
 {
     // cache map           cache moves
     //      3              0   x->1
@@ -3289,102 +3134,8 @@ restart:
         }
     }
 
-    interpolate_luma(ref, rowbytes, *mv, wh, scratch);    // Plain NxM copy can be used
+    interpolate_luma(ref, rowbytes, *mv, wh, scratch);
     *ppbest = scratch;
-
-    // 3. Fractional pel search
-    if (enc->run_param.encode_speed < 9 && mv_in_rect(*mv, &enc->frame.mv_qpel_limit))
-    {
-        point_t vbest = *mv;
-        pix_t *pbest = scratch;
-        pix_t *hpel  = scratch + store_bytes;
-        pix_t *hpel1 = scratch + ((store_bytes == 8) ? 256 : 2*store_bytes);
-        pix_t *hpel2 = hpel1 + store_bytes;
-
-        int i, sad_test;
-        point_t primary_qpel, secondary_qpel, vdiag;
-
-        unsigned minsad1 = sad.cache[1];
-        unsigned minsad2 = sad.cache[3];
-        secondary_qpel = point(-1, 0);
-        primary_qpel = point(0, -1);
-        if (sad.cache[3] >= sad.cache[2])
-            primary_qpel = point(0, 1), minsad2 = sad.cache[2];
-        if (sad.cache[1] >= sad.cache[0])
-            secondary_qpel = point(1, 0), minsad1 = sad.cache[0];
-
-        if (minsad2 > minsad1)
-        {
-            SWAP(point_t, secondary_qpel, primary_qpel);
-        }
-
-        //     ============> primary
-        //     |00 01 02
-        //     |10 11 12
-        //     |20    22
-        //     V
-        //     secondary
-        vdiag = mv_add(primary_qpel, secondary_qpel);
-
-        for (i = 0; i < 7; i++)
-        {
-            pix_t *ptest;
-            switch(i)
-            {
-            case 0:
-                // 02 = interpolate primary half-pel
-                v = mv_add(*mv, mv_add(primary_qpel, primary_qpel));
-                interpolate_luma(ref, rowbytes, v, wh, ptest = hpel1);
-                break;
-            case 1:
-                // 01 q-pel = (00 + 02)/2
-                v = mv_add(*mv, primary_qpel);
-                h264e_qpel_average_wh_align(scratch, hpel1, ptest = hpel, wh);
-                break;
-            case 2:
-                // 20 = interpolate secondary half-pel
-                v = mv_add(*mv, mv_add(secondary_qpel, secondary_qpel));
-                interpolate_luma(ref, rowbytes, v, wh, ptest = hpel2);
-                break;
-            case 3:
-                // 10 q-pel = (00 + 20)/2
-                hpel  = scratch + store_bytes; if (pbest == hpel) hpel = scratch;
-                v = mv_add(*mv, secondary_qpel);
-                h264e_qpel_average_wh_align(scratch, hpel2, ptest = hpel, wh);
-                break;
-            case 4:
-                // 11 q-pel = (02 + 20)/2
-                hpel  = scratch + store_bytes; if (pbest == hpel) hpel = scratch;
-                v = mv_add(*mv, vdiag);
-                h264e_qpel_average_wh_align(hpel1, hpel2, ptest = hpel, wh);
-                break;
-            case 5:
-                // 22 = interpolate center half-pel
-                if (pbest == hpel2) hpel2 = scratch, hpel = scratch + store_bytes;
-                v = mv_add(*mv, mv_add(vdiag, vdiag));
-                interpolate_luma(ref, rowbytes, v, wh, ptest = hpel2);
-                break;
-            case 6:
-            default:
-                // 12 q-pel = (02 + 22)/2
-                hpel  = scratch + store_bytes; if (pbest == hpel) hpel = scratch;
-                v = mv_add(*mv, mv_add(primary_qpel, vdiag));
-                h264e_qpel_average_wh_align(hpel2, hpel1, ptest = hpel, wh);
-                break;
-            }
-
-            sad_test = h264e_sad_mb_unlaign_wh(ptest, 16, b, wh) + me_mv_cost(v, mv_pred, qp);
-            if (sad_test < min_sad)
-            {
-                min_sad = sad_test;
-                vbest = v;
-                pbest = ptest;
-            }
-        }
-
-        *mv = vbest;
-        *ppbest = pbest;
-    }
     return min_sad;
 }
 
@@ -3466,7 +3217,7 @@ static void inter_choose_mode(h264e_enc_t *enc)
     mv_skip_a = mb_abs_mv(enc, mv_skip);
 
     // Try skip mode
-    if (mv_in_rect(mv_skip_a, &enc->frame.mv_qpel_limit))
+    if (mv_in_rect(mv_skip_a, &enc->frame.mv_limit))
     {
         int *sad4 = cand_sad4[0];
         interpolate_luma(ref_yuv, ref_stride, mv_skip_a, point(16, 16), enc->ptest);
@@ -3585,19 +3336,13 @@ static void inter_choose_mode(h264e_enc_t *enc)
 
             mv_pred = me_mv_medianpredictor_get(enc, point(0, 0), wh);
 
-            part_sad += me_search_diamond(enc, ref_yuv,
+            part_sad += me_search_diamond(ref_yuv,
                 enc->scratch->mb_pix_inp, ref_stride, &mvabs, &range, enc->rc.qp,
                 mb_abs_mv(enc, mv_pred), sad_best, wh,
-                store, &diamond_out, 256);
+                store, &diamond_out);
 
             pred_test = diamond_out;
-            if (pred_test < store + 2*256)
-            {
-                pred_best = (pred_test == store ? store + 256 : store);
-            } else
-            {
-                pred_best = (pred_test == (store + 512) ? store + 512 + 256 : store + 512);
-            }
+            pred_best = (pred_test == store ? store + 256 : store);
 
             mv = mv_sub(mvabs, point(enc->mb.x*16*4, enc->mb.y*16*4));
 
@@ -3623,7 +3368,7 @@ static void inter_choose_mode(h264e_enc_t *enc)
             enc->mb.mv [0] = mv_skip;
             enc->mb.mvd[0] = mv_sub(mv_skip, mv_pred_16x16);
 
-            assert(mv_in_rect(mv_skip_a, &enc->frame.mv_qpel_limit)) ;
+            assert(mv_in_rect(mv_skip_a, &enc->frame.mv_limit)) ;
             interpolate_luma(ref_yuv, ref_stride, mv_skip_a, point(16, 16), enc->pbest);
             interpolate_chroma(enc, mv_skip_a);
         }
@@ -4069,9 +3814,7 @@ static int H264E_init_one(h264e_enc_t *enc, const H264E_create_param_t *opt, int
     enc->frame.w = enc->frame.nmbx*16;
     enc->frame.h = enc->frame.nmby*16;
     enc->frame.mv_limit.tl = point(-MV_GUARD*4, -MV_GUARD*4);
-    enc->frame.mv_qpel_limit.tl = mv_add(enc->frame.mv_limit.tl, point(4*4, 4*4));
     enc->frame.mv_limit.br = point((enc->frame.nmbx*16 - (16 - MV_GUARD))*4, (enc->frame.nmby*16 - (16 - MV_GUARD))*4);
-    enc->frame.mv_qpel_limit.br = mv_add(enc->frame.mv_limit.br, point(-4*4, -4*4));
     enc->frame.cropping_flag = !!((opt->width | opt->height) & 15);
     enc->param = *opt;
 
