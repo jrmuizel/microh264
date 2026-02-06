@@ -12,10 +12,6 @@ extern "C" {
 #endif
 
 
-#ifndef H264E_MAX_THREADS
-#   define H264E_MAX_THREADS 4
-#endif
-
 /**
 *   API return error codes
 */
@@ -34,43 +30,17 @@ extern "C" {
 *   Frame type definitions
 *   - Sequence must start with key (IDR) frame.
 *   - P (Predicted) frames are most efficiently coded
-*   - Dropable frames may be safely removed from bitstream, and used
-*     for frame rate scalability
-*   - Golden and Recovery frames used for error recovery. These
-*     frames uses "long-term reference" for prediction, and
-*     can be decoded if P frames sequence is interrupted.
-*     They acts similarly to key frame, but coded more efficiently.
-*
-*   Type        Refers to   Saved as long-term  Saved as short-term
-*   ---------------------------------------------------------------
-*   Key (IDR) : N/A         Yes                 Yes                |
-*   Golden    : long-term   Yes                 Yes                |
-*   Recovery  : long-term   No                  Yes                |
-*   P         : short-term  No                  Yes                |
-*   Droppable : short-term  No                  No                 |
-*                                                                  |
-*   Example sequence:        K   P   P   G   D   P   R   D   K     |
-*   long-term reference       1K  1K  1K  4G  4G  4G  4G  4G  9K   |
-*                             /         \ /         \         /    |
-*   coded frame             1K  2P  3P  4G  5D  6P  7R  8D  9K     |
-*                             \ / \ / \   \ /   / \   \ /     \    |
-*   short-term reference      1K  2P  3P  4G  4G  6P  7R  7R  9K   |
-*
 */
 #define H264E_FRAME_TYPE_DEFAULT    0       // Frame type set according to GOP size
 #define H264E_FRAME_TYPE_KEY        6       // Random access point: SPS+PPS+Intra frame
-#define H264E_FRAME_TYPE_I          5       // Intra frame: updates long & short-term reference
-#define H264E_FRAME_TYPE_GOLDEN     4       // Use and update long-term reference
-#define H264E_FRAME_TYPE_RECOVERY   3       // Use long-term reference, updates short-term reference
+#define H264E_FRAME_TYPE_I          5       // Intra frame
 #define H264E_FRAME_TYPE_P          2       // Use and update short-term reference
-#define H264E_FRAME_TYPE_DROPPABLE  1       // Use short-term reference, don't update anything
-#define H264E_FRAME_TYPE_CUSTOM     99      // Application specifies reference frame
 
 /**
 *   Speed preset index.
 *   Currently used values are 0, 1, 8 and 9
 */
-#define H264E_SPEED_SLOWEST         0       // All coding tools enabled, including denoise filter
+#define H264E_SPEED_SLOWEST         0       // All coding tools enabled
 #define H264E_SPEED_BALANCED        5
 #define H264E_SPEED_FASTEST         10      // Minimum tools enabled
 
@@ -95,63 +65,13 @@ typedef struct H264E_create_param_tag
     // Note, that this value defines Level,
     int vbv_size_bytes;
 
-    // If set: transparent frames produced on VBV overflow
-    // If not set: VBV overflow ignored, produce bitrate bigger than specified
-    int vbv_overflow_empty_frame_flag;
-
-    // If set: keep minimum bitrate using stuffing, prevent VBV underflow
-    // If not set: ignore VBV underflow, produce bitrate smaller than specified
-    int vbv_underflow_stuffing_flag;
-
-    // If set: control bitrate at macroblock-level (better bitrate precision)
-    // If not set: control bitrate at frame-level (better quality)
-    int fine_rate_control_flag;
-
     // If set: don't change input, but allocate additional frame buffer
     // If not set: use input as a scratch
     int const_input_flag;
 
-    // If 0: golden, recovery, and custom frames are disabled
-    // If >0: Specifies number of persistent frame buffer's used
-    int max_long_term_reference_frames;
-
     int enableNEON;
 
-    // If set: enable temporal noise suppression
-    int temporal_denoise_flag;
-
     int sps_id;
-
-
-#if H264E_MAX_THREADS
-    //           Multi-thread extension
-    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-    // Maximum threads, supported by the callback
-    int max_threads;
-
-    // Opaque token, passed to callback
-    void *token;
-
-    // Application-supplied callback function.
-    // This callback runs given jobs, by calling provided job_func(), passing
-    // job_data[i] to each one.
-    //
-    // The h264e_thread_pool_run() can be used here, example:
-    //
-    //      int max_threads = 4;
-    //      void *thread_pool = h264e_thread_pool_init(max_threads);
-    //
-    //      H264E_create_param_t par;
-    //      par.max_threads = max_threads;
-    //      par.token = thread_pool;
-    //      par.run_func_in_thread = h264e_thread_pool_run;
-    //
-    // The reason to use double callbacks is to avoid mixing portable and
-    // system-dependent code, and to avoid close() function in the encoder API.
-    //
-    void (*run_func_in_thread)(void *token, void (*job_func)(void*), void *job_data[], int njobs);
-#endif
 
 } H264E_create_param_t;
 
@@ -168,19 +88,6 @@ typedef struct H264E_run_param_tag
     // if 0: GOP pattern defined by create_param::gop value
     int frame_type;
 
-    // Used only if frame_type == H264E_FRAME_TYPE_CUSTOM
-    // Reference long-term frame index [1..max_long_term_reference_frames]
-    // 0 = use previous frame (short-term)
-    // -1 = IDR frame, kill all long-term frames
-    int long_term_idx_use;
-
-    // Used only if frame_type == H264E_FRAME_TYPE_CUSTOM
-    // Store decoded frame in long-term buffer with given index in the
-    // range [1..max_long_term_reference_frames]
-    // 0 = save to short-term buffer
-    // -1 = Don't save frame (dropable)
-    int long_term_idx_update;
-
     // Target frame size. Typically = bitrate/framerate
     int desired_frame_bytes;
 
@@ -191,21 +98,6 @@ typedef struct H264E_run_param_tag
     // Maximum quantizer value, 51 indicates very bad quality
     // range: [qp_min; 51]
     int qp_max;
-
-    // Desired NALU size. NALU produced as soon as it's size exceed this value
-    // if 0: frame would be coded with a single NALU
-    int desired_nalu_bytes;
-
-    // Optional NALU notification callback, called by the encoder
-    // as soon as NALU encoding complete.
-    void (*nalu_callback)(
-        const unsigned char *nalu_data, // Coded NALU data, w/o start code
-        int sizeof_nalu_data,           // Size of NALU data
-        void *token                     // optional transparent token
-        );
-
-    // token to pass to NALU callback
-    void *nalu_callback_token;
 
 } H264E_run_param_t;
 
@@ -313,13 +205,6 @@ void H264E_set_vbv_state(
 /************************************************************************/
 /*      Build configuration                                             */
 /************************************************************************/
-#ifndef H264E_ENABLE_DENOISE
-#define H264E_ENABLE_DENOISE 1 // Build-in noise supressor
-#endif
-
-#ifndef MAX_LONG_TERM_FRAMES
-#define MAX_LONG_TERM_FRAMES 8 // Max long-term frames count
-#endif
 
 #if !defined(MINIH264_ONLY_SIMD) && (defined(_M_X64) || defined(_M_ARM64) || defined(__x86_64__) || defined(__aarch64__))
 /* x64 always have SSE2, arm64 always have neon, no need for generic code */
@@ -635,7 +520,7 @@ typedef struct H264E_persist_tag
         int skip_run;               // Skip run count
 
         // according to table 7-13
-        // -1 = skip, 0 = P16x16, 1 = P16x8, 2=P8x16, 3 = P8x8, 5 = I4x4, >=6 = I16x16
+        // -1 = skip, 0 = P16x16, 5 = I4x4, >=6 = I16x16
         int type;                   // MB type
 
         struct
@@ -655,12 +540,6 @@ typedef struct H264E_persist_tag
 
     H264E_io_yuv_t ref;             // Current reference picture
     H264E_io_yuv_t dec;             // Reconstructed current macroblock
-#if H264E_ENABLE_DENOISE
-    H264E_io_yuv_t denoise;         // Noise suppression filter
-#endif
-
-    unsigned char *lt_yuv[MAX_LONG_TERM_FRAMES][3]; // Long-term reference pictures
-    unsigned char lt_used[MAX_LONG_TERM_FRAMES];    // Long-term "used" flags
 
     struct
     {
@@ -715,8 +594,6 @@ typedef struct H264E_persist_tag
         int disable_deblock;        // Disable deblock filter flags
     } speed;
 
-    int most_recent_ref_frame_idx;  // Last updated long-term reference
-
     // predictors contexts
     point_t *mv_pred;               // MV for left&top 4x4 blocks
     uint8_t *nnz;                   // Number of non-zero coeffs per 4x4 block for left&top
@@ -729,10 +606,6 @@ typedef struct H264E_persist_tag
     bs_t bs[1];                     // Output bitbuffer
 
     scratch_t *scratch;             // Pointer to scratch RAM
-#if H264E_MAX_THREADS > 1
-    scratch_t *scratch_store[H264E_MAX_THREADS];   // Pointer to scratch RAM
-    int sizeof_scaratch;
-#endif
     H264E_run_param_t run_param;    // Copy of run-time parameters
 
     // Consecutive IDR's must have different idr_pic_id,
@@ -743,10 +616,6 @@ typedef struct H264E_persist_tag
     pix_t *ptest;                   // Macroblock predictor under test
 
     point_t mv_clusters[2];         // MV clusterization for prediction
-
-    // Flag to track short-term reference buffer, for MMCO 1 command
-    int short_term_used;
-
 
 } h264e_enc_t;
 
@@ -1091,28 +960,6 @@ ADJUSTABLE uint16_t g_lambda_i16_q4[] = {
     592, 575, 558, 540, 523,
     506, 506,
 };
-
-const uint8_t g_diff_to_gainQ8[256] =
-{
-    0, 16, 25, 32, 37, 41, 44, 48, 50, 53, 55, 57, 59, 60, 62, 64, 65,
-    66, 67, 69, 70, 71, 72, 73, 74, 75, 76, 76, 77, 78, 79, 80, 80,
-    81, 82, 82, 83, 83, 84, 85, 85, 86, 86, 87, 87, 88, 88, 89, 89,
-    90, 90, 91, 91, 92, 92, 92, 93, 93, 94, 94, 94, 95, 95, 96, 96,
-    96, 97, 97, 97, 98, 98, 98, 99, 99, 99, 99, 100, 100, 100, 101, 101,
-    101, 102, 102, 102, 102, 103, 103, 103, 103, 104, 104, 104, 104, 105, 105, 105,
-    105, 106, 106, 106, 106, 106, 107, 107, 107, 107, 108, 108, 108, 108, 108, 109,
-    109, 109, 109, 109, 110, 110, 110, 110, 110, 111, 111, 111, 111, 111, 112, 112,
-    112, 112, 112, 112, 113, 113, 113, 113, 113, 113, 114, 114, 114, 114, 114, 114,
-    115, 115, 115, 115, 115, 115, 115, 116, 116, 116, 116, 116, 116, 117, 117, 117,
-    117, 117, 117, 117, 118, 118, 118, 118, 118, 118, 118, 118, 119, 119, 119, 119,
-    119, 119, 119, 119, 120, 120, 120, 120, 120, 120, 120, 120, 121, 121, 121, 121,
-    121, 121, 121, 121, 122, 122, 122, 122, 122, 122, 122, 122, 122, 123, 123, 123,
-    123, 123, 123, 123, 123, 123, 124, 124, 124, 124, 124, 124, 124, 124, 124, 125,
-    125, 125, 125, 125, 125, 125, 125, 125, 125, 126, 126, 126, 126, 126, 126, 126,
-    126, 126, 126, 126, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 128,
-};
-
-
 
 
 static uint8_t byteclip_deblock(int x)
@@ -1471,80 +1318,6 @@ static void h264e_deblock_luma(uint8_t *pix, int32_t stride, const deblock_param
     }
 }
 
-static void h264e_denoise_run(unsigned char *frm, unsigned char *frmprev, int w, int h_arg, int stride_frm, int stride_frmprev)
-{
-    int cloop, h = h_arg;
-    if (w <= 2 || h <= 2)
-    {
-        return;
-    }
-    w -= 2;
-    h -= 2;
-
-    do
-    {
-        unsigned char *pf = frm += stride_frm;
-        unsigned char *pp = frmprev += stride_frmprev;
-        cloop = w;
-        pp[-stride_frmprev] = *pf++;
-        pp++;
-        do
-        {
-            int d, neighbourhood;
-            unsigned g, gd, gn, out_val;
-            d = pf[0] - pp[0];
-            neighbourhood  = pf[-1]      - pp[-1];
-            neighbourhood += pf[+1]      - pp[+1];
-            neighbourhood += pf[-stride_frm] - pp[-stride_frmprev];
-            neighbourhood += pf[+stride_frm] - pp[+stride_frmprev];
-
-            if (d < 0)
-            {
-                d = -d;
-            }
-            if (neighbourhood < 0)
-            {
-                neighbourhood = -neighbourhood;
-            }
-            neighbourhood >>= 2;
-
-            gd = g_diff_to_gainQ8[d];
-            gn = g_diff_to_gainQ8[neighbourhood];
-
-            gn <<= 2;
-            if (gn > 255)
-            {
-                gn = 255;
-            }
-
-            gn = 255 - gn;
-            gd = 255 - gd;
-            g = gn*gd;  // Q8*Q8 = Q16;
-
-            //out_val = ((pp[0]*g ) >> 16) + (((0xffff-g)*pf[0] ) >> 16);
-            //out_val = ((pp[0]*g + (1<<15)) >> 16) + (((0xffff-g)*pf[0]  + (1<<15)) >> 16);
-            out_val = (pp[0]*g + (0xffff - g)*pf[0]  + (1 << 15)) >> 16;
-
-            assert(out_val <= 255);
-
-            pp[-stride_frmprev] = (unsigned char)out_val;
-            //pp[-stride_frmprev] = gd;//(unsigned char)((neighbourhood+1)>255?255:(neighbourhood+1));
-
-            pf++, pp++;
-        } while (--cloop);
-
-        pp[-stride_frmprev] = *pf++;
-    } while(--h);
-
-    memcpy(frmprev + stride_frmprev, frm + stride_frm, w + 2);
-    h = h_arg - 2;
-    do
-    {
-        memcpy(frmprev, frmprev - stride_frmprev, w + 2);
-        frmprev -= stride_frmprev;
-    } while(--h);
-    memcpy(frmprev, frm - stride_frm*(h_arg - 2), w + 2);
-}
 
 #undef IS_NULL
 #define IS_NULL(p) ((p) < (pix_t *)32)
@@ -2921,10 +2694,6 @@ loop_enter:
 }
 
 
-// Experimental code branch:
-// Rate-control takes into account that long-term references compresses worser than short-term
-#define H264E_RATE_CONTROL_GOLDEN_FRAMES 1
-
 /************************************************************************/
 /*      Constants (can't be changed)                                    */
 /************************************************************************/
@@ -2946,8 +2715,6 @@ loop_enter:
 #define MAX_MV_CAND     20
 
 #define STARTCODE_4BYTES 4
-
-#define SCALABLE_BASELINE 83
 
 /************************************************************************/
 /*      Hardcoded params (can be changed at compile time)               */
@@ -3023,8 +2790,6 @@ H264E_API(void, h264e_transform_add, (pix_t *out, int out_stride, const pix_t *p
 H264E_API(int,  h264e_transform_sub_quant_dequant, (const pix_t *inp, const pix_t *pred, int inp_stride, int mode, quant_t *q, const uint16_t *qdat))
 H264E_API(void, h264e_quant_luma_dc, (quant_t *q, int16_t *deq, const uint16_t *qdat))
 H264E_API(int,  h264e_quant_chroma_dc, (quant_t *q, int16_t *deq, const uint16_t *qdat))
-// h264e_denoise
-H264E_API(void, h264e_denoise_run, (unsigned char *frm, unsigned char *frmprev, int w, int h, int stride_frm, int stride_frmprev))
 #   undef H264E_API
 } vft_t;
 
@@ -3066,8 +2831,6 @@ H264E_API(void, h264e_transform_add, (pix_t *out, int out_stride, const pix_t *p
 H264E_API(int,  h264e_transform_sub_quant_dequant, (const pix_t *inp, const pix_t *pred, int inp_stride, int mode, quant_t *q, const uint16_t *qdat))
 H264E_API(void, h264e_quant_luma_dc, (quant_t *q, int16_t *deq, const uint16_t *qdat))
 H264E_API(int,  h264e_quant_chroma_dc, (quant_t *q, int16_t *deq, const uint16_t *qdat))
-// h264e_denoise
-H264E_API(void, h264e_denoise_run, (unsigned char *frm, unsigned char *frmprev, int w, int h, int stride_frm, int stride_frmprev))
 #undef H264E_API
 };
 
@@ -3112,7 +2875,6 @@ static void init_vft(int enableNEON)
 #   define h264e_transform_sub_quant_dequant MAP_NAME(h264e_transform_sub_quant_dequant)
 #   define h264e_quant_luma_dc               MAP_NAME(h264e_quant_luma_dc)
 #   define h264e_quant_chroma_dc             MAP_NAME(h264e_quant_chroma_dc)
-#   define h264e_denoise_run                 MAP_NAME(h264e_denoise_run)
 #endif
 
 /************************************************************************/
@@ -3766,11 +3528,6 @@ static void nal_end(h264e_enc_t *enc)
         // insert escape bytes
         bs_bytes = nal_put_esc(nal, nal + cnt_esc, bs_bytes);
     }
-    if (enc->run_param.nalu_callback)
-    {
-        // Call application-supplied callback
-        enc->run_param.nalu_callback(nal, bs_bytes, enc->run_param.nalu_callback_token);
-    }
     enc->out_pos += bs_bytes;
 }
 
@@ -3784,13 +3541,9 @@ static void nal_end(h264e_enc_t *enc)
 *   ref: [1] 7.3.2.1.1
 */
 
-//temp global
-#define dependency_id 1
-#define quality_id 0
-#define default_base_mode_flag 0
 #define log2_max_frame_num_minus4 1
 
-static void encode_sps(h264e_enc_t *enc, int profile_idc)
+static void encode_sps(h264e_enc_t *enc)
 {
     struct limit_t
     {
@@ -3822,14 +3575,14 @@ static void encode_sps(h264e_enc_t *enc, int profile_idc)
 
     while (plim->level < 51 && (enc->frame.nmb > plim->max_fs ||
         enc->param.vbv_size_bytes > plim->max_vbvdiv5*(5*1000/8) ||
-        (unsigned)(enc->frame.nmb*(enc->param.max_long_term_reference_frames + 1)) > plim->max_dpb))
+        (unsigned)(enc->frame.nmb) > plim->max_dpb))
     {
         plim++;
     }
 
-    nal_start(enc, 0x67 | (profile_idc == SCALABLE_BASELINE)*8);
-    U(8, profile_idc);  // profile, 66 = baseline
-    U(8, plim->constrains & ((profile_idc!= SCALABLE_BASELINE)*4));     // no constrains
+    nal_start(enc, 0x67);
+    U(8, 66);  // profile, 66 = baseline
+    U(8, plim->constrains & 4);     // no constrains
     U(8, plim->level);
     //U(5, 0x1B);       // sps_id|log2_max_frame_num_minus4|pic_order_cnt_type
     //UE(0);  // sps_id 1
@@ -3837,7 +3590,7 @@ static void encode_sps(h264e_enc_t *enc, int profile_idc)
 
     UE(log2_max_frame_num_minus4);  // log2_max_frame_num_minus4  1 UE(0);  // log2_max_frame_num_minus4  1
     UE(2);  // pic_order_cnt_type         011
-    UE(1 + enc->param.max_long_term_reference_frames);  // num_ref_frames
+    UE(1);  // num_ref_frames
     U1(0);                                      // gaps_in_frame_num_value_allowed_flag);
     UE(((enc->param.width + 15) >> 4) - 1);     // pic_width_in_mbs_minus1
     UE(((enc->param.height + 15) >> 4) - 1);    // pic_height_in_map_units_minus1
@@ -3896,7 +3649,7 @@ static void encode_pps(h264e_enc_t *enc, int pps_id)
 *   Encode Slice Header
 *   ref: [1] 7.3.3
 */
-static void encode_slice_header(h264e_enc_t *enc, int frame_type, int long_term_idx_use, int long_term_idx_update, int pps_id, int enc_type)
+static void encode_slice_header(h264e_enc_t *enc, int frame_type, int pps_id)
 {
     // slice reset
     enc->slice.start_mb_num = enc->mb.num;
@@ -3904,88 +3657,33 @@ static void encode_slice_header(h264e_enc_t *enc, int frame_type, int long_term_
     memset(enc->i4x4mode, -1, (enc->frame.nmbx + 1)*4);
     memset(enc->nnz, NNZ_NA, (enc->frame.nmbx + 1)*8);    // DF ignore slice borders, but uses it's own nnz's
 
-    if (enc_type == 0)
-    {
-        nal_start(enc, (frame_type == H264E_FRAME_TYPE_KEY ? 5 : 1) | (long_term_idx_update >= 0 ? 0x60 : 0));
-    }
+    nal_start(enc, (frame_type == H264E_FRAME_TYPE_KEY ? 5 : 1) | 0x60);
 
     UE(enc->slice.start_mb_num);        // first_mb_in_slice
     UE(enc->slice.type);                // slice_type
-    //U(1+4, 16 + (enc->frame.num&15));   // pic_parameter_set_id | frame_num
     UE(pps_id);                           // pic_parameter_set_id
-    U(4 + log2_max_frame_num_minus4, enc->frame.num & ((1 << (log2_max_frame_num_minus4 + 4)) - 1)); // frame_num U(4, enc->frame.num&15);            // frame_num
+    U(4 + log2_max_frame_num_minus4, enc->frame.num & ((1 << (log2_max_frame_num_minus4 + 4)) - 1)); // frame_num
     if (frame_type == H264E_FRAME_TYPE_KEY)
     {
         UE(enc->next_idr_pic_id);       // idr_pic_id
     }
-    //!!!  if !quality_id && enc->slice.type == SLICE_TYPE_P  put_bit(s, 0); // num_ref_idx_active_override_flag = 0
-    if(!quality_id)
-    {
-        if (((enc_type != 0)) && enc->slice.type == SLICE_TYPE_P)
-        {
-            //U1(0);
-        }
-        if (enc->slice.type == SLICE_TYPE_P)// if( slice_type == P  | |  slice_type ==  SP  | |  slice_type  = =  B )
-        {
-            int ref_pic_list_modification_flag_l0 = long_term_idx_use > 0;
-            //U1(0);                      // num_ref_idx_active_override_flag
-            // ref_pic_list_modification()
-            U(2, ref_pic_list_modification_flag_l0); // num_ref_idx_active_override_flag | ref_pic_list_modification_flag_l0
-            if (ref_pic_list_modification_flag_l0)
-            {
-                // Table 7-7
-                UE(2);      // long_term_pic_num is present and specifies the long-term picture number for a reference picture
-                UE(long_term_idx_use - 1); // long_term_pic_num
-                UE(3);      // End loop
-            }
-        }
 
-        if (long_term_idx_update >= 0)
-        {
-            //dec_ref_pic_marking( )
-            if (frame_type == H264E_FRAME_TYPE_KEY)
-            {
-                //U1(0);                                      // no_output_of_prior_pics_flag
-                //U1(enc->param.enable_golden_frames_flag);   // long_term_reference_flag
-                U(2, enc->param.max_long_term_reference_frames > 0);   // no_output_of_prior_pics_flag | long_term_reference_flag
-            } else
-            {
-                int adaptive_ref_pic_marking_mode_flag = long_term_idx_update > 0;//(frame_type == H264E_FRAME_TYPE_GOLDEN);
-                U1(adaptive_ref_pic_marking_mode_flag);
-                if (adaptive_ref_pic_marking_mode_flag)
-                {
-                    // Table 7-9
-                    if (enc->short_term_used)
-                    {
-                        UE(1);  // unmark short
-                        UE(0);  // unmark short
-                    }
-                    if (enc->lt_used[long_term_idx_update - 1])
-                    {
-                        UE(2);  // Mark a long-term reference picture as "unused for reference"
-                        UE(long_term_idx_update - 1); // index
-                    } else
-                    {
-                        UE(4);  // Specify the maximum long-term frame index
-                        UE(enc->param.max_long_term_reference_frames);    // [0,max-1]+1
-                    }
-                    UE(6);  // Mark the current picture as "used for long-term reference"
-                    UE(long_term_idx_update - 1);   // index
-                    UE(0);  // End loop
-                }
-            }
-        }
-    }
-    SE(enc->rc.prev_qp - enc->sps.pic_init_qp);     // slice_qp_delta
-#if H264E_MAX_THREADS
-    if (enc->param.max_threads > 1)
+    if (enc->slice.type == SLICE_TYPE_P)
     {
-        UE(enc->speed.disable_deblock ? 1 : 2);
+        U(2, 0); // num_ref_idx_active_override_flag | ref_pic_list_modification_flag_l0
+    }
+
+    //dec_ref_pic_marking( )
+    if (frame_type == H264E_FRAME_TYPE_KEY)
+    {
+        U(2, 0);   // no_output_of_prior_pics_flag | long_term_reference_flag
     } else
-#endif
     {
-        UE(enc->speed.disable_deblock);             // disable deblock
+        U1(0); // adaptive_ref_pic_marking_mode_flag
     }
+
+    SE(enc->rc.prev_qp - enc->sps.pic_init_qp);     // slice_qp_delta
+    UE(enc->speed.disable_deblock);             // disable deblock
 
     if (enc->speed.disable_deblock != 1)
     {
@@ -4002,13 +3700,12 @@ static void encode_slice_header(h264e_enc_t *enc, int frame_type, int long_term_
 /**
 *   Macroblock transform, quantization and bitstream encoding
 */
-static void mb_write(h264e_enc_t *enc, int enc_type, int base_mode)
+static void mb_write(h264e_enc_t *enc)
 {
     int i, uv, mb_type, cbpc, cbpl, cbp;
     scratch_t *qv = enc->scratch;
-    //int base_mode = enc_type > 0 ? 1 : 0;
-    int mb_type_svc = base_mode ? -2 : enc->mb.type;
-    int intra16x16_flag = mb_type_svc >= 6;// && !base_mode;
+    int mb_type_svc = enc->mb.type;
+    int intra16x16_flag = mb_type_svc >= 6;
     uint8_t nz[9];
     uint8_t *nnz_top = enc->nnz + 8 + enc->mb.x*8;
     uint8_t *nnz_left = enc->nnz;
@@ -4145,24 +3842,8 @@ l_skip:
             enc->mb.skip_run = 0;
         }
 
-        (void)enc_type;
+        UE(mb_type);
 
-        if (!base_mode)
-            UE(mb_type);
-
-        if (enc->mb.type == 3) // 8x8
-        {
-            for (i = 0; i < 4; i++)
-            {
-                UE(0);
-            }
-            // 0 = 8x8
-            // 1 = 8x4
-            // 2 = 4x8
-            // 3 = 4x4
-        }
-
-        if (!base_mode)
         {
             if (enc->mb.type >= 5)   // intra
             {
@@ -4189,35 +3870,13 @@ l_skip:
                 me_mv_medianpredictor_put(enc, 0, 0, 4, 4, point(MV_NA,0));
             } else
             {
-                int part, x = 0, y = 0;
-                int dx = (enc->mb.type & 2) ? 2 : 4;
-                int dy = (enc->mb.type & 1) ? 2 : 4;
-                for (part = 0;;part++)
-                {
-                    SE(enc->mb.mvd[part].s.x);
-                    SE(enc->mb.mvd[part].s.y);
-                    me_mv_medianpredictor_put(enc, x, y, dx, dy, enc->mb.mv[part]);
-                    me_mv_dfmatrix_put(enc->df.df_mv, x, y, dx, dy, enc->mb.mv[part]);
-                    x = (x + dx) & 3;
-                    if (!x)
-                    {
-                        y = (y + dy) & 3;
-                        if (!y)
-                        {
-                            break;
-                        }
-                    }
-                }
+                SE(enc->mb.mvd[0].s.x);
+                SE(enc->mb.mvd[0].s.y);
+                me_mv_medianpredictor_put(enc, 0, 0, 4, 4, enc->mb.mv[0]);
+                me_mv_dfmatrix_put(enc->df.df_mv, 0, 0, 4, 4, enc->mb.mv[0]);
             }
         }
         cbp = cbpl + (cbpc << 4);
-        /*temp for test up-sample filter*/
-        /*if(base_mode)
-        {
-            cbp = 0;
-            cbpl=0;
-            cbpc = 0;
-        }*/
         if (mb_type_svc < 6)
         {
             // encode cbp 9.1.2 Mapping process for coded block pattern
@@ -4538,34 +4197,16 @@ static void interpolate_luma(const pix_t *ref, int stride, point_t mv, point_t w
 static void interpolate_chroma(h264e_enc_t *enc, point_t mv)
 {
     int i;
+    point_t wh;
+    wh.s.x = 8;
+    wh.s.y = 8;
     for (i = 1; i < 3; i++)
     {
-        point_t wh;
-        int part = 0, x = 0, y = 0;
-        wh.s.x = (enc->mb.type & 2) ? 4 : 8;
-        wh.s.y = (enc->mb.type & 1) ? 4 : 8;
-        if (enc->mb.type == -1) // skip
-        {
-            wh.s.x = wh.s.y = 8;
-        }
-
-        for (;;part++)
-        {
-            pix_t *ref;
-            mv = mb_abs_mv(enc, enc->mb.mv[part]);
-            ref = enc->ref.yuv[i] + ((mv.s.y >> 3) + y)*enc->ref.stride[i] + (mv.s.x >> 3) + x;
-            mv.u32 &= 0x00070007;
-            h264e_qpel_interpolate_chroma(ref, enc->ref.stride[i], enc->ptest + (i - 1)*8 + 16*y + x, wh, mv);
-            x = (x + wh.s.x) & 7;
-            if (!x)
-            {
-                y = (y + wh.s.y) & 7;
-                if (!y)
-                {
-                    break;
-                }
-            }
-        }
+        pix_t *ref;
+        mv = mb_abs_mv(enc, enc->mb.mv[0]);
+        ref = enc->ref.yuv[i] + (mv.s.y >> 3)*enc->ref.stride[i] + (mv.s.x >> 3);
+        mv.u32 &= 0x00070007;
+        h264e_qpel_interpolate_chroma(ref, enc->ref.stride[i], enc->ptest + (i - 1)*8, wh, mv);
     }
 }
 
@@ -4841,45 +4482,6 @@ static int me_mv_refine_cand(point_t *p, int n)
 }
 
 /**
-*   Choose candidates for inter MB partitioning (16x8,8x16 or 8x8),
-*   using SAD's for 8x8 sub-blocks
-*/
-static void mb_inter_partition(/*const */int sad[4], int mode[4])
-{
-/*
-    slope
-        |[ 1  1]| _ |[ 1 -1]|
-        |[-1 -1]|   |[ 1 -1]|
-        indicates v/h gradient: big negative = vertical prediction; big positive = horizontal
-
-    skew
-        |[ 1  0]| _ |[ 0 -1]|
-        |[ 0 -1]|   |[ 1  0]|
-        indicates diagonal gradient: big negative = diagonal down right
-*/
-    int p00 = sad[0];
-    int p01 = sad[1];
-    int p10 = sad[2];
-    int p11 = sad[3];
-    int sum = p00 + p01 + p10 + p11;
-    int slope = ABS((p00 - p10) + (p01 - p11)) - ABS((p00 - p01) + (p10 - p11));
-    int skew = ABS(p11 - p00) - ABS(p10 - p01);
-
-    if (slope >  (sum >> 4))
-    {
-        mode[1] = 1;    // try 8x16 partition
-    }
-    if (slope < -(sum >> 4))
-    {
-        mode[2] = 1;    // try 16x8 partition
-    }
-    if (ABS(skew) > (sum >> 4) && ABS(slope) <= (sum >> 4))
-    {
-        mode[3] = 1;    // try 8x8 partition
-    }
-}
-
-/**
 *   Online MV clustering to "long" and "short" clusters
 *   Estimate mean "long" and "short" vectors
 */
@@ -4905,7 +4507,6 @@ static void mv_clusters_update(h264e_enc_t *enc, point_t mv)
 */
 static void inter_choose_mode(h264e_enc_t *enc)
 {
-    int prefered_modes[4] = { 1, 0, 0, 0 };
     point_t mv_skip, mv_skip_a, mv_cand[MAX_MV_CAND];
     point_t mv_pred_16x16 = me_mv_medianpredictor_get_skip(enc);
     point_t mv_best = point(MV_NA, 0); // avoid warning
@@ -4972,11 +4573,6 @@ static void inter_choose_mode(h264e_enc_t *enc)
             }
         }
 
-        if (enc->run_param.encode_speed < 1) // enable 8x16, 16x8 and 8x8 partitions
-        {
-            mb_inter_partition(sad4, prefered_modes);
-        }
-
         //sad_skip += me_mv_cost(mv_skip, mv_pred_16x16, enc->rc.qp);
 
         // Too big skip SAD. Use skip predictor as a diamond start point candidate
@@ -5019,11 +4615,6 @@ static void inter_choose_mode(h264e_enc_t *enc)
             off = ((mv.s.y + 0) >> 2)*ref_stride + ((mv.s.x + 0) >> 2);
             sad = h264e_sad_mb_unlaign_8x8(ref_yuv + off, ref_stride, enc->scratch->mb_pix_inp, sad4);
 
-            if (enc->run_param.encode_speed < 1) // enable 8x16, 16x8 and 8x8 partitions
-            {
-                mb_inter_partition(sad4, prefered_modes);
-            }
-
             if (sad + mv_cand_cost < sad_best + mv_cand_cost_best)
             //if (sad < sad_best)
             {
@@ -5037,86 +4628,42 @@ static void inter_choose_mode(h264e_enc_t *enc)
     sad_best += me_mv_cost(mv_best, mv_pred_16x16, enc->rc.qp);
 
     {
-        int mb_type;
-        point_t wh, part, mvpred_ctx[12], part_mv[4][16], part_mvd[4][16];
+        point_t wh, mvpred_ctx[12];
         pix_t *store = enc->scratch->mb_pix_store;
         pix_t *pred_best = store, *pred_test = store + 256;
 
-#define MAX8X8_MODES 4
         me_mv_medianpredictor_save_ctx(enc, mvpred_ctx);
         enc->mb.cost = 0xffffff;
-        for (mb_type = 0; mb_type < MAX8X8_MODES; mb_type++)
         {
-            static const int nbits[4] = { 1, 4, 4, 12 };
-            int imv = 0;
-            int part_sad = MUL_LAMBDA(nbits[mb_type], g_lambda_q4[enc->rc.qp]);
+            int part_sad = MUL_LAMBDA(1, g_lambda_q4[enc->rc.qp]);
+            rectangle_t range;
+            pix_t *diamond_out;
+            point_t mv, mv_pred, mvabs = mb_abs_mv(enc, mv_best);
 
-            if (!prefered_modes[mb_type]) continue;
+            wh.s.x = 16;
+            wh.s.y = 16;
+            me_mv_set_range(&mvabs, &range, &enc->frame.mv_limit, enc->mb.y*16*4);
 
-            wh.s.x = (mb_type & 2) ? 8 : 16;
-            wh.s.y = (mb_type & 1) ? 8 : 16;
-            part = point(0, 0);
-            for (;;)
+            mv_pred = me_mv_medianpredictor_get(enc, point(0, 0), wh);
+
+            part_sad += me_search_diamond(enc, ref_yuv,
+                enc->scratch->mb_pix_inp, ref_stride, &mvabs, &range, enc->rc.qp,
+                mb_abs_mv(enc, mv_pred), sad_best, wh,
+                store, &diamond_out, 256);
+
+            pred_test = diamond_out;
+            if (pred_test < store + 2*256)
             {
-                rectangle_t range;
-                pix_t *diamond_out;
-                point_t mv, mv_pred, mvabs = mb_abs_mv(enc, mv_best);
-                me_mv_set_range(&mvabs, &range, &enc->frame.mv_limit, enc->mb.y*16*4 + part.s.y*4);
-
-                mv_pred = me_mv_medianpredictor_get(enc, part, wh);
-
-                if (mb_type)
-                {
-                    mvabs = mv_round_qpel(mb_abs_mv(enc, mv_pred));
-                    me_mv_set_range(&mvabs, &range, &enc->frame.mv_limit, enc->mb.y*16*4 + part.s.y*4);
-                    off = ((mvabs.s.y >> 2) + part.s.y)*ref_stride + ((mvabs.s.x >> 2) + part.s.x);
-                    sad_best = h264e_sad_mb_unlaign_wh(ref_yuv + off, ref_stride, enc->scratch->mb_pix_inp + part.s.y*16 + part.s.x, wh)
-                        + me_mv_cost(mvabs,
-                        //mv_pred,
-                        mb_abs_mv(enc, mv_pred),
-                        enc->rc.qp);
-                }
-
-                part_sad += me_search_diamond(enc, ref_yuv + part.s.y*ref_stride + part.s.x,
-                    enc->scratch->mb_pix_inp + part.s.y*16 + part.s.x, ref_stride, &mvabs, &range, enc->rc.qp,
-                    mb_abs_mv(enc, mv_pred), sad_best, wh,
-                    store, &diamond_out, mb_type ? (mb_type == 2 ? 8 : 128) : 256);
-
-                if (!mb_type)
-                {
-                    pred_test = diamond_out;
-                    if (pred_test < store + 2*256)
-                    {
-                        pred_best = (pred_test == store ? store + 256 : store);
-                        store += 2*256;
-                    } else
-                    {
-                        pred_best = (pred_test == (store + 512) ? store + 512 + 256 : store + 512);
-                    }
-                } else
-                {
-                    h264e_copy_8x8(pred_test + part.s.y*16 + part.s.x, 16, diamond_out);
-                    if (mb_type < 3)
-                    {
-                        int part_off = (wh.s.x >> 4)*8 + (wh.s.y >> 4)*8*16;
-                        h264e_copy_8x8(pred_test + part_off + part.s.y*16 + part.s.x, 16, diamond_out + part_off);
-                    }
-                }
-
-                mv = mv_sub(mvabs, point(enc->mb.x*16*4, enc->mb.y*16*4));
-
-                part_mvd[mb_type][imv] = mv_sub(mv, mv_pred);
-                part_mv[mb_type][imv++] = mv;
-
-                me_mv_medianpredictor_put(enc, part.s.x >> 2, part.s.y >> 2, wh.s.x >> 2, wh.s.y >> 2, mv);
-
-                part.s.x = (part.s.x + wh.s.x) & 15;
-                if (!part.s.x)
-                {
-                    part.s.y = (part.s.y + wh.s.y) & 15;
-                    if (!part.s.y) break;
-                }
+                pred_best = (pred_test == store ? store + 256 : store);
+            } else
+            {
+                pred_best = (pred_test == (store + 512) ? store + 512 + 256 : store + 512);
             }
+
+            mv = mv_sub(mvabs, point(enc->mb.x*16*4, enc->mb.y*16*4));
+
+            enc->mb.mvd[0] = mv_sub(mv, mv_pred);
+            enc->mb.mv[0] = mv;
 
             me_mv_medianpredictor_restore_ctx(enc, mvpred_ctx);
 
@@ -5124,13 +4671,11 @@ static void inter_choose_mode(h264e_enc_t *enc)
             {
                 SWAP(pix_t*, pred_best, pred_test);
                 enc->mb.cost = part_sad;
-                enc->mb.type = mb_type;
+                enc->mb.type = 0;
             }
         }
         enc->pbest = pred_best;
         enc->ptest = pred_test;
-        memcpy(enc->mb.mv,  part_mv [enc->mb.type], 16*sizeof(point_t));
-        memcpy(enc->mb.mvd, part_mvd[enc->mb.type], 16*sizeof(point_t));
 
         if (enc->mb.cost > sad_skip)
         {
@@ -5149,8 +4694,6 @@ static void inter_choose_mode(h264e_enc_t *enc)
 /************************************************************************/
 /*      Deblock filter                                                  */
 /************************************************************************/
-#define MB_FLAG_SVC_INTRA 1
-#define MB_FLAG_SLICE_START_DEBLOCK_2 2
 
 /**
 *   Set deblock filter strength
@@ -5239,7 +4782,7 @@ static void mb_deblock(deblock_filter_t *df, int mb_type, int qp_this, int mbx, 
     uint8_t *tc0 = par.tc0; //[16*2];
 
     df_strength(df, mb_type, mbx, strength, IntraBLFlag);
-    if (!mbx || (IntraBLFlag & MB_FLAG_SLICE_START_DEBLOCK_2))
+    if (!mbx)
     {
         strength32[0] = 0;
     }
@@ -5310,12 +4853,11 @@ static void mb_deblock(deblock_filter_t *df, int mb_type, int qp_this, int mbx, 
 /**
 *   Macroblock encoding
 */
-static void mb_encode(h264e_enc_t *enc, int enc_type)
+static void mb_encode(h264e_enc_t *enc)
 {
     pix_t *top = enc->top_line + 48 + enc->mb.x*32;
     pix_t *left = enc->top_line;
     int avail = enc->mb.avail = mb_avail_flag(enc);
-    int base_mode = 0;
 
     if (enc->frame.cropping_flag && ((enc->mb.x + 1)*16 > enc->param.width || (enc->mb.y + 1)*16 > enc->param.height))
     {
@@ -5364,24 +4906,11 @@ static void mb_encode(h264e_enc_t *enc, int enc_type)
         interpolate_chroma(enc, mb_abs_mv(enc, enc->mb.mv[0]));
     }
 
-    mb_write(enc, enc_type, base_mode);
+    mb_write(enc);
 
     if (!enc->speed.disable_deblock)
     {
-        int mbx = enc->mb.x;
-        int mby = enc->mb.y;
-#if H264E_MAX_THREADS
-        if (enc->param.max_threads > 1)
-        {   // Avoid deblock across slice border
-            if (enc->mb.num < enc->slice.start_mb_num + enc->frame.nmbx)
-                mby = 0;
-            if (enc->mb.num == enc->slice.start_mb_num)
-            {
-                base_mode |= MB_FLAG_SLICE_START_DEBLOCK_2;
-            }
-        }
-#endif
-        mb_deblock(&enc->df, enc->mb.type, enc->rc.prev_qp, mbx, mby, &enc->dec, base_mode);
+        mb_deblock(&enc->df, enc->mb.type, enc->rc.prev_qp, enc->mb.x, enc->mb.y, &enc->dec, 0);
     }
 }
 
@@ -5495,7 +5024,7 @@ static void rc_set_qp(h264e_enc_t *enc, int qp)
 *   3. Estimate desired stationary VBV level
 *
 */
-static int rc_frame_start(h264e_enc_t *enc, int is_intra, int is_refers_to_long_term)
+static int rc_frame_start(h264e_enc_t *enc, int is_intra)
 {
     unsigned np = MIN(enc->param.gop - 1u, 63u);
     int nmb = enc->frame.nmb;
@@ -5532,21 +5061,6 @@ static int rc_frame_start(h264e_enc_t *enc, int is_intra, int is_refers_to_long_
         int nominal_i = mul32x32shr16(nominal_p, peak_factor_q16);
         add_bits = nominal_i - bit_budget;
     }
-#if H264E_RATE_CONTROL_GOLDEN_FRAMES
-    else if (is_refers_to_long_term)
-    {
-        int d_qp = enc->rc.max_dqp - enc->rc.dqp_smooth;
-        unsigned peak_factor_golden_q16;
-        int nominal_golden;
-        d_qp = MAX(d_qp, 2);
-        d_qp = MIN(d_qp, 12);
-        d_qp = d_qp * 4 * 85 >> 8;//* 16 / 12;
-
-        peak_factor_golden_q16 = (peak_factor_q16 - (1 << 16)) * d_qp >> 4;
-        nominal_golden = nominal_p + mul32x32shr16(nominal_p, peak_factor_golden_q16);
-        add_bits = nominal_golden - bit_budget;
-    }
-#endif
     else
     {
         add_bits = nominal_p - bit_budget;
@@ -5566,11 +5080,7 @@ static int rc_frame_start(h264e_enc_t *enc, int is_intra, int is_refers_to_long_
     bit_budget = MIN(bit_budget, enc->run_param.desired_frame_bytes*8*16);
     bit_budget = MAX(bit_budget, enc->run_param.desired_frame_bytes*8 >> 2);
 
-#if H264E_RATE_CONTROL_GOLDEN_FRAMES
-    if (is_intra || is_refers_to_long_term)
-#else
     if (is_intra)
-#endif
     {
         // Increase VBV target level due to to I-frame load: this avoids QP adaptation after I-frame
         enc->rc.vbv_target_level = enc->rc.vbv_bits + bit_budget - enc->run_param.desired_frame_bytes*8;
@@ -5584,53 +5094,24 @@ static int rc_frame_start(h264e_enc_t *enc, int is_intra, int is_refers_to_long_
 
     enc->rc.bit_budget = bit_budget;
 
-    if (enc->param.fine_rate_control_flag && enc->frame.num)
     {
-        qp = enc->rc.qp_smooth >> 8;
-    } else
-    {
-
-#if H264E_RATE_CONTROL_GOLDEN_FRAMES
-        if (is_refers_to_long_term)
+        const uint16_t *bits = bits_per_mb[!!is_intra];
+        for (qp = 0; qp < 42 - 1; qp++)
         {
-            for (qp = 0; qp < 42 - 1; qp++)
+            if (bits[qp]*nmb < bit_budget)
             {
-                //if (((bits_per_mb[0][qp] + bits_per_mb[1][qp]) >> 1)*nmb < bit_budget)
-                if (((bits_per_mb[0][qp] + bits_per_mb[1][qp]) >> 1)*nmb < bit_budget)
-                    break;
-            }
-        } else
-#endif
-        {
-            const uint16_t *bits = bits_per_mb[!!is_intra];
-            for (qp = 0; qp < 42 - 1; qp++)
-            {
-                if (bits[qp]*nmb < bit_budget)
-                {
-                    break;
-                }
+                break;
             }
         }
-        qp += MIN_QP;
+    }
+    qp += MIN_QP;
 
-#if H264E_RATE_CONTROL_GOLDEN_FRAMES
-        if (is_refers_to_long_term)
-        {
-            int dqp = MAX(enc->rc.max_dqp, enc->rc.dqp_smooth);
-            dqp  = MIN(dqp, enc->rc.dqp_smooth + 6);
-            qp += dqp;
-            qp = MAX(enc->rc.prev_qp, qp);
-        } else
-#endif
-        {
-            qp += enc->rc.dqp_smooth;
-        }
+    qp += enc->rc.dqp_smooth;
 
-        // If reference frame has high qp, motion compensation is less effective, so qp should be increased
-        if (enc->rc.prev_qp > qp + 1)
-        {
-            qp = (enc->rc.prev_qp + qp + 1)/2;
-        }
+    // If reference frame has high qp, motion compensation is less effective, so qp should be increased
+    if (enc->rc.prev_qp > qp + 1)
+    {
+        qp = (enc->rc.prev_qp + qp + 1)/2;
     }
 
     enc->rc.qp = 0; // force
@@ -5646,10 +5127,10 @@ static int rc_frame_start(h264e_enc_t *enc, int is_intra, int is_refers_to_long_
 /**
 *   Update rate-control state after frame encode
 */
-static void rc_frame_end(h264e_enc_t *enc, int intra_flag, int skip_flag, int is_refers_to_long_term)
+static void rc_frame_end(h264e_enc_t *enc, int intra_flag, int skip_flag)
 {
     // 1. Update QP offset adaptive adjustment
-    if (!skip_flag /*&& !is_refers_to_long_term*/)
+    if (!skip_flag)
     {
         int qp, nmb = enc->frame.nmb;
         // a posterior qp estimation
@@ -5657,17 +5138,14 @@ static void rc_frame_end(h264e_enc_t *enc, int intra_flag, int skip_flag, int is
 
         qp += MIN_QP;
 
-        if (!is_refers_to_long_term)
+        if ((enc->rc.qp_smooth >> 8) - enc->rc.dqp_smooth < qp - 1)
         {
-            if ((enc->rc.qp_smooth >> 8) - enc->rc.dqp_smooth < qp - 1)
-            {
-                enc->rc.dqp_smooth--;
-            } else if ((enc->rc.qp_smooth >> 8) - enc->rc.dqp_smooth > qp + 1)
-            {
-                enc->rc.dqp_smooth++;
-            }
+            enc->rc.dqp_smooth--;
+        } else if ((enc->rc.qp_smooth >> 8) - enc->rc.dqp_smooth > qp + 1)
+        {
+            enc->rc.dqp_smooth++;
         }
-        if (intra_flag || is_refers_to_long_term)
+        if (intra_flag)
         {
             enc->rc.max_dqp = enc->rc.dqp_smooth;
         } else
@@ -5684,72 +5162,16 @@ static void rc_frame_end(h264e_enc_t *enc, int intra_flag, int skip_flag, int is
     {
         if (enc->rc.vbv_bits < 0)       // VBV underflow
         {
-            if (enc->param.vbv_underflow_stuffing_flag)
-            {
-                // put stuffing ('filler data')
-                nal_start(enc, 12); // filler_data_rbsp
-                do
-                {
-                    U(8, 0xFF);
-                    enc->rc.vbv_bits += 8;
-                } while (enc->rc.vbv_bits < 0);
-                nal_end(enc);
-            } else
-            {
-                // ignore underflow
-                enc->rc.vbv_bits = 0;
-            }
+            enc->rc.vbv_bits = 0;
         }
         if (enc->rc.vbv_bits > enc->param.vbv_size_bytes*8) // VBV overflow
         {
-            if (!enc->param.vbv_overflow_empty_frame_flag)
-            {
-                // ignore overflow
-                enc->rc.vbv_bits = enc->param.vbv_size_bytes*8;
-            }
+            enc->rc.vbv_bits = enc->param.vbv_size_bytes*8;
         }
     } else
     {
         enc->rc.vbv_bits = 0;
     }
-}
-
-/**
-*   Update rate-control state after macroblock encode, set QP for next MB
-*/
-static void rc_mb_end(h264e_enc_t *enc)
-{
-    // used / ncoded = budget/total
-    int bits_coded = h264e_bs_get_pos_bits(enc->bs) +  enc->out_pos*8 + 1;
-    int mb_coded = enc->mb.num; // after increment: 1, 2....
-    int err = bits_coded *enc->frame.nmb - enc->rc.bit_budget*mb_coded;
-    int d_err = err - enc->rc.prev_err;
-    int qp = enc->rc.qp;
-    assert(enc->mb.num);
-    enc->rc.prev_err = err;
-
-    if (err > 0 && d_err > 0)
-    {   // Increasing risk of overflow
-        if (enc->rc.stable_count < 3)
-        {
-            qp++;                       // State not stable: increase QP
-        }
-        enc->rc.stable_count = 0;       // Set state to "not stable"
-    } else if (err < 0 && d_err < 0)
-    {   // Increasing risk of underlow
-        if (enc->rc.stable_count < 3)
-        {
-            qp--;
-        }
-        enc->rc.stable_count = 0;
-    } else
-    {   // Stable state
-        enc->rc.stable_count++;
-    }
-    enc->rc.qp_smooth += qp - (enc->rc.qp_smooth >> 8);
-    qp = MIN(qp, enc->rc.prev_qp + 3);
-    qp = MAX(qp, enc->rc.prev_qp - 3);
-    rc_set_qp(enc, qp);
 }
 
 /************************************************************************/
@@ -5767,10 +5189,7 @@ static int enc_alloc(h264e_enc_t *enc, const H264E_create_param_t *par, unsigned
     unsigned char *p0 = p;
     int nmbx = (par->width  + 15) >> 4;
     int nmby = (par->height + 15) >> 4;
-    int nref_frames = 1 + par->max_long_term_reference_frames + par->const_input_flag;
-#if H264E_ENABLE_DENOISE
-    nref_frames += !!par->temporal_denoise_flag;
-#endif
+    int nref_frames = 1 + par->const_input_flag;
     ALLOC(enc->ref.yuv[0], ((nmbx + 2) * (nmby + 2) * 384) * nref_frames);
     (void)inp_buf_flag;
     return (int)((p - p0) + 15) & ~15u;
@@ -5831,14 +5250,9 @@ static int enc_check_create_params(const H264E_create_param_t *par)
     {
         return H264E_STATUS_BAD_PARAMETER;  // non-positive frame size
     }
-    if ((unsigned)(par->const_input_flag | par->fine_rate_control_flag |
-        par->vbv_overflow_empty_frame_flag | par->vbv_underflow_stuffing_flag) > 1)
+    if ((unsigned)(par->const_input_flag) > 1)
     {
-        return H264E_STATUS_BAD_PARAMETER;  // Any flag is not 0 or 1
-    }
-    if ((unsigned)par->max_long_term_reference_frames > MAX_LONG_TERM_FRAMES)
-    {
-        return H264E_STATUS_BAD_PARAMETER;  // Too many long-term reference frames requested
+        return H264E_STATUS_BAD_PARAMETER;  // Flag is not 0 or 1
     }
     if ((par->width | par->height) & 1)
     {
@@ -5866,11 +5280,7 @@ static int H264E_sizeof_one(const H264E_create_param_t *par, int *sizeof_persist
     }
 
     *sizeof_persist = enc_alloc(NULL, par, (void*)(uintptr_t)1, inp_buf_flag) + sizeof(h264e_enc_t);
-#if H264E_MAX_THREADS > 1
-    *sizeof_scratch = enc_alloc_scratch(NULL, par, (void*)(uintptr_t)1) * (par->max_threads + 1);
-#else
     *sizeof_scratch = enc_alloc_scratch(NULL, par, (void*)(uintptr_t)1);
-#endif
     return error;
 }
 
@@ -5898,29 +5308,9 @@ static int H264E_init_one(h264e_enc_t *enc, const H264E_create_param_t *opt, int
 
 
     base = io_yuv_set_pointers(enc->ref.yuv[0], &enc->ref, enc->frame.nmbx*16, enc->frame.nmby*16);
-#if H264E_ENABLE_DENOISE
-    if (enc->param.temporal_denoise_flag)
-    {
-        pix_t *p = base;
-        base = io_yuv_set_pointers(base, &enc->denoise, enc->frame.nmbx*16, enc->frame.nmby*16);
-        while (p < base) *p++ = 0;
-    }
-#endif
     if (enc->param.const_input_flag)
     {
         base = io_yuv_set_pointers(base, &enc->dec, enc->frame.nmbx*16, enc->frame.nmby*16);
-    }
-    if (enc->param.max_long_term_reference_frames)
-    {
-        H264E_io_yuv_t t;
-        int i;
-        for (i = 0; i < enc->param.max_long_term_reference_frames; i++)
-        {
-            base = io_yuv_set_pointers(base, &t, enc->frame.nmbx*16, enc->frame.nmby*16);
-            enc->lt_yuv[i][0] = t.yuv[0];
-            enc->lt_yuv[i][1] = t.yuv[1];
-            enc->lt_yuv[i][2] = t.yuv[2];
-        }
     }
     return H264E_STATUS_SUCCESS;
 }
@@ -5940,34 +5330,22 @@ int H264E_init(h264e_enc_t *enc, const H264E_create_param_t *opt)
     return ret;
 }
 
-static void encode_slice(h264e_enc_t *enc, int frame_type, int long_term_idx_use, int long_term_idx_update, int pps_id, int enc_type)
+static void encode_slice(h264e_enc_t *enc, int frame_type, int pps_id)
 {
     int i, k;
-    encode_slice_header(enc, frame_type, long_term_idx_use, long_term_idx_update, pps_id,enc_type);
+    encode_slice_header(enc, frame_type, pps_id);
     // encode frame
     do
     {   // encode row
         do
         {   // encode macroblock
-            if (enc->run_param.desired_nalu_bytes &&
-                h264e_bs_get_pos_bits(enc->bs) > enc->run_param.desired_nalu_bytes*8u)
-            {
-                // start new slice
-                nal_end(enc);
-                encode_slice_header(enc, frame_type, long_term_idx_use, long_term_idx_update, pps_id, enc_type);
-            }
-
-            mb_encode(enc, enc_type);
+            mb_encode(enc);
 
             enc->dec.yuv[0] += 16;
             enc->dec.yuv[1] += 8;
             enc->dec.yuv[2] += 8;
 
-            enc->mb.num++;  // before rc_mb_end
-            if (enc->param.fine_rate_control_flag)
-            {
-                rc_mb_end(enc);
-            }
+            enc->mb.num++;
         } while (++enc->mb.x < enc->frame.nmbx);
 
         for (i = 0, k = 16; i < 3; i++, k = 8)
@@ -5994,166 +5372,24 @@ static void encode_slice(h264e_enc_t *enc, int frame_type, int long_term_idx_use
     }
 }
 
-#if H264E_MAX_THREADS
-typedef struct
-{
-    H264E_persist_t *enc;
-    int frame_type, long_term_idx_use, long_term_idx_update, pps_id, enc_type;
-} h264_enc_slice_thread_params_t;
-
-static void encode_slice_thread_simple(void *arg)
-{
-    h264_enc_slice_thread_params_t *h = (h264_enc_slice_thread_params_t*)arg;
-    encode_slice(h->enc, h->frame_type, h->long_term_idx_use, h->long_term_idx_update, h->pps_id, h->enc_type);
-}
-#endif
-
 static int H264E_encode_one(H264E_persist_t *enc, const H264E_run_param_t *opt,
-    int long_term_idx_use, int is_refers_to_long_term, int long_term_idx_update,
-    int frame_type, int pps_id, int enc_type)
+    int is_intra, int frame_type, int pps_id)
 {
-    int i, k;
     // slice reset
-    enc->slice.type = (long_term_idx_use < 0 ? SLICE_TYPE_I : SLICE_TYPE_P);
-    rc_frame_start(enc, (long_term_idx_use < 0) ? 1 : 0, is_refers_to_long_term);
+    enc->slice.type = (is_intra ? SLICE_TYPE_I : SLICE_TYPE_P);
+    rc_frame_start(enc, is_intra);
 
     enc->mb.x = enc->mb.y = enc->mb.num = 0;
 
-    if (long_term_idx_use > 0)
+    encode_slice(enc, frame_type, pps_id);
+
+    rc_frame_end(enc, is_intra, enc->mb.skip_run == enc->frame.nmb);
+
+    pix_copy_recon_pic_to_ref(enc);
+
+    if (++enc->frame.num >= enc->param.gop && enc->param.gop && (opt->frame_type == H264E_FRAME_TYPE_DEFAULT))
     {
-        // Activate long-term reference buffer
-        for (i = 0; i < 3; i++)
-        {
-            SWAP(pix_t*, enc->ref.yuv[i], enc->lt_yuv[long_term_idx_use - 1][i]);
-        }
-    }
-
-    if (enc->param.vbv_size_bytes && !long_term_idx_use && long_term_idx_update <= 0 &&
-        enc->rc.vbv_bits - enc->run_param.desired_frame_bytes*8 > enc->param.vbv_size_bytes*8)
-    {
-        // encode transparent frame on VBV overflow
-        encode_slice_header(enc, frame_type, long_term_idx_use, long_term_idx_update, pps_id,enc_type);
-        enc->mb.skip_run = enc->frame.nmb;
-        UE(enc->mb.skip_run);
-        nal_end(enc);
-        for (i = 0, k = 16; i < 3; i++, k = 8)
-        {
-            pix_copy_pic(enc->dec.yuv[i], enc->dec.stride[i], enc->ref.yuv[i], enc->ref.stride[i], enc->frame.nmbx*k, enc->frame.nmby*k);
-        }
-    } else
-    {
-#if H264E_MAX_THREADS
-        if (enc->param.max_threads > 1)
-        {
-            H264E_persist_t enc_thr[H264E_MAX_THREADS];
-            int sizeof_scratch = enc_alloc_scratch(NULL, &enc->param, (void*)(uintptr_t)1);
-            unsigned char *scratch_base = ((unsigned char*)enc->scratch) + sizeof_scratch;
-            int mby = 0;
-            int ithr;
-            int nmby = enc->frame.nmby;
-            void *savep[3];
-            for (i = 0; i < 3; i++)
-            {
-                savep[i] = enc->dec.yuv[i];
-            }
-
-            for (ithr = 0; ithr < enc->param.max_threads; ithr++)
-            {
-                enc_thr[ithr] = *enc;
-                enc_thr[ithr].mb.y = mby;
-                enc_thr[ithr].mb.num = mby*enc->frame.nmbx;
-                mby += (enc->frame.nmby - mby) / (enc->param.max_threads - ithr);
-                enc_thr[ithr].frame.nmby = mby;
-                enc_thr[ithr].rc.bit_budget /= enc->param.max_threads;
-                enc_thr[ithr].frame.nmb = enc_thr[ithr].frame.nmbx * enc_thr[ithr].frame.nmby;
-
-                for (i = 0, k = 16; i < 3; i++, k = 8)
-                {
-                    enc_thr[ithr].dec.yuv[i] += k*enc->dec.stride[i]*enc_thr[ithr].mb.y;
-                }
-
-                //enc_alloc_scratch(enc_thr + ithr, &enc->param, (unsigned char*)(scratch_thr[ithr]));
-                scratch_base += enc_alloc_scratch(enc_thr + ithr, &enc->param, scratch_base);
-                enc_thr[ithr].out_pos = 0;
-                h264e_bs_init_bits(enc_thr[ithr].bs, enc_thr[ithr].out);
-            }
-
-            {
-                h264_enc_slice_thread_params_t thread_par[H264E_MAX_THREADS];
-                void *args[H264E_MAX_THREADS];
-                for (i = 0; i < enc->param.max_threads; i++)
-                {
-                    thread_par[i].enc = enc_thr + i;
-                    thread_par[i].frame_type = frame_type;
-                    thread_par[i].long_term_idx_use = long_term_idx_use;
-                    thread_par[i].long_term_idx_update = long_term_idx_update;
-                    thread_par[i].pps_id = pps_id;
-                    thread_par[i].enc_type = enc_type;
-                    args[i] = thread_par + i;
-                }
-                enc->param.run_func_in_thread(enc->param.token, encode_slice_thread_simple, args, enc->param.max_threads);
-            }
-
-            for (i = 0; i < enc->param.max_threads; i++)
-            {
-                memcpy(enc->out + enc->out_pos, enc_thr[i].out, enc_thr[i].out_pos);
-                enc->out_pos += enc_thr[i].out_pos;
-            }
-            enc->frame.nmby = nmby;
-            for (i = 0; i < 3; i++)
-            {
-                enc->dec.yuv[i] = savep[i];
-            }
-        } else
-#endif
-        {
-            encode_slice(enc, frame_type, long_term_idx_use, long_term_idx_update, pps_id, enc_type);
-        }
-    }
-
-    // Set flags for AMM state machine for standard compliance
-    if (frame_type == H264E_FRAME_TYPE_KEY)
-    {
-        // Reset long-term reference frames
-        memset(enc->lt_used, 0, sizeof(enc->lt_used));
-        // Assume that this frame is not short-term (have effect only if AMM used)
-        enc->short_term_used = 0;
-    }
-    if (long_term_idx_update > 0)
-    {
-        enc->lt_used[long_term_idx_update - 1] = 1;
-    } else if (long_term_idx_update == 0)
-    {
-        enc->short_term_used = 1;
-    }
-
-    rc_frame_end(enc, long_term_idx_use == -1, enc->mb.skip_run == enc->frame.nmb, is_refers_to_long_term);
-
-    if (long_term_idx_use > 0)
-    {
-        // deactivate long-term reference
-        for (i = 0; i < 3; i++)
-        {
-            SWAP(pix_t*, enc->ref.yuv[i], enc->lt_yuv[long_term_idx_use - 1][i]);
-        }
-    }
-
-    if (long_term_idx_update != -1)
-    {
-        pix_copy_recon_pic_to_ref(enc);
-
-        if (++enc->frame.num >= enc->param.gop && enc->param.gop && (opt->frame_type == H264E_FRAME_TYPE_DEFAULT))
-        {
-            enc->frame.num = 0;     // trigger to encode IDR on next call
-        }
-
-        if (long_term_idx_update > 0)
-        {
-            for (i = 0; i < 3; i++)
-            {
-                SWAP(pix_t*, enc->ref.yuv[i], enc->lt_yuv[long_term_idx_update - 1][i]);
-            }
-        }
+        enc->frame.num = 0;     // trigger to encode IDR on next call
     }
 
     return H264E_STATUS_SUCCESS;
@@ -6163,10 +5399,7 @@ static int check_parameters_align(const H264E_create_param_t *opt, const H264E_i
 {
     int i;
     int min_align = 0;
-    if (opt->const_input_flag && opt->temporal_denoise_flag)
-    {
-        min_align = 0;
-    }
+    (void)opt;
     for (i = 0; i < 3; i++)
     {
         if (((uintptr_t)in->yuv[i]) & min_align)
@@ -6188,11 +5421,8 @@ static int check_parameters_align(const H264E_create_param_t *opt, const H264E_i
 int H264E_encode(H264E_persist_t *enc, H264E_scratch_t *scratch, const H264E_run_param_t *opt,
     H264E_io_yuv_t *in, unsigned char **coded_data, int *sizeof_coded_data)
 {
-    int i;
     int frame_type;
-    int long_term_idx_use;
-    int long_term_idx_update;
-    int is_refers_to_long_term;
+    int is_intra;
     int error;
 
     error = check_parameters_align(&enc->param, in);
@@ -6200,25 +5430,9 @@ int H264E_encode(H264E_persist_t *enc, H264E_scratch_t *scratch, const H264E_run
     {
         return error;
     }
-    (void)i;
-    i = enc_alloc_scratch(enc, &enc->param, (unsigned char*)scratch);
+    enc_alloc_scratch(enc, &enc->param, (unsigned char*)scratch);
 
     enc->inp = *in;
-
-#if H264E_ENABLE_DENOISE
-    // 1. Run optional denoise filter
-    if (enc->param.temporal_denoise_flag && opt->encode_speed < 2)
-    {
-        int sh = 0;
-        for (i = 0; i < 3; i++)
-        {
-            h264e_denoise_run(in->yuv[i], enc->denoise.yuv[i],  enc->param.width >> sh, enc->param.height >> sh, in->stride[i], enc->denoise.stride[i]);
-            enc->inp.yuv[i] = enc->denoise.yuv[i];
-            enc->inp.stride[i] = enc->denoise.stride[i];
-            sh = 1;
-        }
-    }
-#endif
 
     enc->out_pos = 0;   // reset output bitbuffer position
 
@@ -6252,74 +5466,30 @@ int H264E_encode(H264E_persist_t *enc, H264E_scratch_t *scratch, const H264E_run
     {
         frame_type = enc->frame.num ? H264E_FRAME_TYPE_P : H264E_FRAME_TYPE_KEY;
     }
-    // Estimate long-term indexes from frame type
-    // index 0 means "short-term" reference
-    // index -1 means "not used"
-    switch (frame_type)
-    {
-    default:
-    case H264E_FRAME_TYPE_I:        long_term_idx_use = -1; long_term_idx_update = 0; break;
-    case H264E_FRAME_TYPE_KEY:      long_term_idx_use = -1; long_term_idx_update = enc->param.max_long_term_reference_frames > 0; break;
-    case H264E_FRAME_TYPE_GOLDEN:   long_term_idx_use =  1; long_term_idx_update = 1; break;
-    case H264E_FRAME_TYPE_RECOVERY: long_term_idx_use =  1; long_term_idx_update = 0; break;
-    case H264E_FRAME_TYPE_P:        long_term_idx_use =  enc->most_recent_ref_frame_idx; long_term_idx_update =  0; break;
-    case H264E_FRAME_TYPE_DROPPABLE:long_term_idx_use =  enc->most_recent_ref_frame_idx; long_term_idx_update = -1; break;
-    case H264E_FRAME_TYPE_CUSTOM:   long_term_idx_use =  opt->long_term_idx_use; long_term_idx_update = opt->long_term_idx_update;
-        if (!long_term_idx_use)
-        {
-            long_term_idx_use = enc->most_recent_ref_frame_idx;
-        }
-        if (long_term_idx_use < 0)
-        {
-            // hack: redefine frame type, always encode IDR
-            frame_type = H264E_FRAME_TYPE_KEY;
-        }
-        break;
-    }
 
-#if H264E_RATE_CONTROL_GOLDEN_FRAMES
-    is_refers_to_long_term = (long_term_idx_use != enc->most_recent_ref_frame_idx && long_term_idx_use >= 0);
-#else
-    is_refers_to_long_term = 0;
-#endif
+    is_intra = (frame_type == H264E_FRAME_TYPE_KEY || frame_type == H264E_FRAME_TYPE_I);
 
-    if (long_term_idx_update >= 0)
-    {
-        enc->most_recent_ref_frame_idx = long_term_idx_update;
-    }
     if (frame_type == H264E_FRAME_TYPE_KEY)
     {
         int pic_init_qp = 30;
         pic_init_qp = MIN(pic_init_qp, enc->run_param.qp_max);
         pic_init_qp = MAX(pic_init_qp, enc->run_param.qp_min);
 
-        //temp only two layers!
         enc->sps.pic_init_qp = pic_init_qp;
         enc->next_idr_pic_id ^= 1;
         enc->frame.num = 0;
 
-        {
-            encode_sps(enc, 66);
-            encode_pps(enc, 0);
-        }
+        encode_sps(enc);
+        encode_pps(enc, 0);
     } else
     {
         if (!enc->sps.pic_init_qp)
         {
             return H264E_STATUS_BAD_FRAME_TYPE;
         }
-        if (long_term_idx_use > enc->param.max_long_term_reference_frames ||
-            long_term_idx_update > enc->param.max_long_term_reference_frames ||
-            long_term_idx_use > MAX_LONG_TERM_FRAMES)
-        {
-            return H264E_STATUS_BAD_FRAME_TYPE;
-        }
     }
 
-    {
-        H264E_encode_one(enc, opt, long_term_idx_use, is_refers_to_long_term, long_term_idx_update,
-            frame_type, enc->param.sps_id*4 + 0, 0);
-    }
+    H264E_encode_one(enc, opt, is_intra, frame_type, enc->param.sps_id*4 + 0);
 
     *sizeof_coded_data = enc->out_pos;
     *coded_data = enc->out;

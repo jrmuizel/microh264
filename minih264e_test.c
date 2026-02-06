@@ -9,10 +9,6 @@
 
 #define DEFAULT_GOP 20
 #define DEFAULT_QP 33
-#define DEFAULT_DENOISE 0
-
-#define ENABLE_TEMPORAL_SCALABILITY 0
-#define MAX_LONG_TERM_FRAMES        8 // used only if ENABLE_TEMPORAL_SCALABILITY==1
 
 #define DEFAULT_MAX_FRAMES  99999
 
@@ -31,90 +27,11 @@ int sizeof_coded_data, frame_size, g_w, g_h, _qp;
 #define ALIGNED_ALLOC(n, size) aligned_alloc(n, (size + n - 1)/n*n)
 #endif
 
-#if H264E_MAX_THREADS
-#include "system.h"
-typedef struct
-{
-    void *event_start;
-    void *event_done;
-    void (*callback)(void*);
-    void *job;
-    void *thread;
-    int terminated;
-} h264e_thread_t;
-
-static THREAD_RET THRAPI minih264_thread_func(void *arg)
-{
-    h264e_thread_t *t = (h264e_thread_t *)arg;
-    thread_name("h264");
-    for (;;)
-    {
-        event_wait(t->event_start, INFINITE);
-        if (t->terminated)
-            break;
-        t->callback(t->job);
-        event_set(t->event_done);
-    }
-    return 0;
-}
-
-void *h264e_thread_pool_init(int max_threads)
-{
-    int i;
-    h264e_thread_t *threads = (h264e_thread_t *)calloc(sizeof(h264e_thread_t), max_threads);
-    if (!threads)
-        return 0;
-    for (i = 0; i < max_threads; i++)
-    {
-        h264e_thread_t *t = threads + i;
-        t->event_start = event_create(0, 0);
-        t->event_done  = event_create(0, 0);
-        t->thread = thread_create(minih264_thread_func, t);
-    }
-    return threads;
-}
-
-void h264e_thread_pool_close(void *pool, int max_threads)
-{
-    int i;
-    h264e_thread_t *threads = (h264e_thread_t *)pool;
-    for (i = 0; i < max_threads; i++)
-    {
-        h264e_thread_t *t = threads + i;
-        t->terminated = 1;
-        event_set(t->event_start);
-        thread_wait(t->thread);
-        thread_close(t->thread);
-        event_destroy(t->event_start);
-        event_destroy(t->event_done);
-    }
-    free(pool);
-}
-
-void h264e_thread_pool_run(void *pool, void (*callback)(void*), void *callback_job[], int njobs)
-{
-    h264e_thread_t *threads = (h264e_thread_t*)pool;
-    int i;
-    for (i = 0; i < njobs; i++)
-    {
-        h264e_thread_t *t = threads + i;
-        t->callback = (void (*)(void *))callback;
-        t->job = callback_job[i];
-        event_set(t->event_start);
-    }
-    for (i = 0; i < njobs; i++)
-    {
-        h264e_thread_t *t = threads + i;
-        event_wait(t->event_done, INFINITE);
-    }
-}
-#endif
-
 struct
 {
     const char *input_file;
     const char *output_file;
-    int gen, gop, qp, kbps, max_frames, threads, speed, denoise, stats, psnr;
+    int gen, gop, qp, kbps, max_frames, speed, stats, psnr;
 } cmdline[1];
 
 static int str_equal(const char *pattern, char **p)
@@ -138,7 +55,6 @@ static int read_cmdline_options(int argc, char *argv[])
     cmdline->max_frames = DEFAULT_MAX_FRAMES;
     cmdline->kbps = 0;
     //cmdline->kbps = 2048;
-    cmdline->denoise = DEFAULT_DENOISE;
     for (i = 1; i < argc; i++)
     {
         char *p = argv[i];
@@ -160,15 +76,9 @@ static int read_cmdline_options(int argc, char *argv[])
             } else if (str_equal(("maxframes"), &p))
             {
                 cmdline->max_frames = atoi(p);
-            } else if (str_equal(("threads"), &p))
-            {
-                cmdline->threads = atoi(p);
             } else if (str_equal(("speed"), &p))
             {
                 cmdline->speed = atoi(p);
-            } else if (str_equal(("denoise"), &p))
-            {
-                cmdline->denoise = 1;
             } else if (str_equal(("stats"), &p))
             {
                 cmdline->stats = 1;
@@ -204,9 +114,7 @@ static int read_cmdline_options(int argc, char *argv[])
                "    -qp<n>          - set QP [10..51]\n"
                "    -kbps<n>        - set bitrate (fps=30 assumed)\n"
                "    -maxframes<n>   - encode no more than given number of frames\n"
-               "    -threads<n>     - use <n> threads for encode\n"
                "    -speed<n>       - speed [0..10], 0 means best quality\n"
-               "    -denoise        - use temporal noise supression\n"
                "    -stats          - print frame statistics\n"
                "    -psnr           - print psnr statistics\n");
         return 0;
@@ -456,34 +364,11 @@ int main(int argc, char *argv[])
     }
 
     create_param.enableNEON = 1;
-#if H264E_SVC_API
-    create_param.num_layers = 1;
-    create_param.inter_layer_pred_flag = 0;
-#endif
     create_param.gop = cmdline->gop;
     create_param.height = g_h;
     create_param.width  = g_w;
-    create_param.max_long_term_reference_frames = 0;
-#if ENABLE_TEMPORAL_SCALABILITY
-    create_param.max_long_term_reference_frames = MAX_LONG_TERM_FRAMES;
-#endif
-    create_param.fine_rate_control_flag = 0;
     create_param.const_input_flag = cmdline->psnr ? 0 : 1;
-    //create_param.vbv_overflow_empty_frame_flag = 1;
-    //create_param.vbv_underflow_stuffing_flag = 1;
     create_param.vbv_size_bytes = cmdline->kbps*1000/8*2; // 2 seconds vbv buffer for quality, so rate control can allocate more bits for intra frame
-    create_param.temporal_denoise_flag = cmdline->denoise;
-
-#if H264E_MAX_THREADS
-    void *thread_pool = NULL;
-    create_param.max_threads = cmdline->threads;
-    if (cmdline->threads)
-    {
-        thread_pool = h264e_thread_pool_init(cmdline->threads);
-        create_param.token = thread_pool;
-        create_param.run_func_in_thread = h264e_thread_pool_run;
-    }
-#endif
 
     frame_size = g_w*g_h*3/2;
     buf_in   = (uint8_t*)ALIGNED_ALLOC(64, frame_size);
@@ -540,7 +425,6 @@ int main(int argc, char *argv[])
 
             run_param.frame_type = 0;
             run_param.encode_speed = cmdline->speed;
-            //run_param.desired_nalu_bytes = 100;
 
             if (cmdline->kbps)
             {
@@ -552,39 +436,6 @@ int main(int argc, char *argv[])
                 run_param.qp_min = run_param.qp_max = cmdline->qp;
             }
 
-#if ENABLE_TEMPORAL_SCALABILITY
-            {
-            int level, logmod = 1;
-            int j, mod = 1 << logmod;
-            static int fresh[200] = {-1,-1,-1,-1};
-
-            run_param.frame_type = H264E_FRAME_TYPE_CUSTOM;
-
-            for (level = logmod; level && (~i & (mod >> level)); level--){}
-
-            run_param.long_term_idx_update = level + 1;
-            if (level == logmod && logmod > 0)
-                run_param.long_term_idx_update = -1;
-            if (level == logmod - 1 && logmod > 1)
-                run_param.long_term_idx_update = 0;
-
-            //if (run_param.long_term_idx_update > logmod) run_param.long_term_idx_update -= logmod+1;
-            //run_param.long_term_idx_update = logmod - 0 - level;
-            //if (run_param.long_term_idx_update > 0)
-            //{
-            //    run_param.long_term_idx_update = logmod - run_param.long_term_idx_update;
-            //}
-            run_param.long_term_idx_use    = fresh[level];
-            for (j = level; j <= logmod; j++)
-            {
-                fresh[j] = run_param.long_term_idx_update;
-            }
-            if (!i)
-            {
-                run_param.long_term_idx_use = -1;
-            }
-            }
-#endif
             error = H264E_encode(enc, scratch, &run_param, &yuv, &coded_data, &sizeof_coded_data);
             assert(!error);
 
@@ -626,11 +477,5 @@ int main(int argc, char *argv[])
         fclose(fin);
     if (fout)
         fclose(fout);
-#if H264E_MAX_THREADS
-    if (thread_pool)
-    {
-        h264e_thread_pool_close(thread_pool, cmdline->threads);
-    }
-#endif
     return 0;
 }
