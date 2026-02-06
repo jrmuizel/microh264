@@ -826,71 +826,41 @@ static void h264e_intra_predict_16x16(pix_t *predict, const pix_t *left, const p
     } while (--cloop);
 }
 
-static void h264e_intra_predict_chroma(pix_t *predict, const pix_t *left, const pix_t *top, int mode)
+static void h264e_intra_predict_chroma(pix_t *predict, const pix_t *left, const pix_t *top)
 {
-    int cloop = 8;
+    int cloop, ccloop = 2;
     uint32_t *d = (uint32_t*)predict;
     assert(IS_ALIGNED(predict, 4));
     assert(IS_ALIGNED(top, 4));
-    if (mode < 1)
+    // DC prediction with per-quadrant DC values
+    cloop = 2;
+    do
     {
-        uint32_t t0, t1, t2, t3;
-        t0 = ((uint32_t*)top)[0];
-        t1 = ((uint32_t*)top)[1];
-        t2 = ((uint32_t*)top)[2];
-        t3 = ((uint32_t*)top)[3];
-        do
+        d[0] = d[1] = d[16] = intra_predict_dc(left, top, 2);
+        d[17] = intra_predict_dc(left + 4, top + 4, 2);
+        if (!IS_NULL(top))
         {
-            *d++ = t0;
-            *d++ = t1;
-            *d++ = t2;
-            *d++ = t3;
-        } while (--cloop);
-    } else if (mode == 1)
-    {
-        do
+            d[1] = intra_predict_dc(NULL, top + 4, 2);
+        }
+        if (!IS_NULL(left))
         {
-            uint32_t u = left[0] * 0x01010101u;
-            uint32_t v = left[8] * 0x01010101u;
-            d[0] = u;
-            d[1] = u;
-            d[2] = v;
-            d[3] = v;
-            d += 4;
-            left++;
-        } while(--cloop);
-    } else //if (mode == 2)
-    {
-        int ccloop = 2;
-        cloop = 2;
-        do
-        {
-            d[0] = d[1] = d[16] = intra_predict_dc(left, top, 2);
-            d[17] = intra_predict_dc(left + 4, top + 4, 2);
-            if (!IS_NULL(top))
-            {
-                d[1] = intra_predict_dc(NULL, top + 4, 2);
-            }
-            if (!IS_NULL(left))
-            {
-                d[16] = intra_predict_dc(NULL, left + 4, 2);
-            }
-            d += 2;
-            left += 8;
-            top += 8;
-        } while(--cloop);
+            d[16] = intra_predict_dc(NULL, left + 4, 2);
+        }
+        d += 2;
+        left += 8;
+        top += 8;
+    } while(--cloop);
 
+    do
+    {
+        cloop = 12;
         do
         {
-            cloop = 12;
-            do
-            {
-                *d = d[-4];
-                d++;
-            } while(--cloop);
-            d += 4;
-        } while(--ccloop);
-    }
+            *d = d[-4];
+            d++;
+        } while(--cloop);
+        d += 4;
+    } while(--ccloop);
 }
 
 static void copy_wh(const uint8_t *src, int src_stride, uint8_t *dst, int w, int h)
@@ -2425,12 +2395,7 @@ static void mb_write(h264e_enc_t *enc)
 
         if (enc->mb.type >= 6)   // intra 16x16
         {
-            int pred_mode_chroma = enc->mb.i16.pred_mode_luma;
-            if (!(pred_mode_chroma&1))
-            {
-                pred_mode_chroma ^= 2;
-            }
-            UE(pred_mode_chroma);
+            UE(0); // chroma intra pred mode = DC
             me_mv_medianpredictor_put(enc, point(MV_NA,0));
         } else
         {
@@ -2850,7 +2815,7 @@ static void mb_encode(h264e_enc_t *enc)
     if (enc->mb.type >= 6)
     {
         pix_t *pred = enc->ptest;
-        h264e_intra_predict_chroma(pred, left + 16, top + 16, enc->mb.i16.pred_mode_luma);
+        h264e_intra_predict_chroma(pred, left + 16, top + 16);
     } else
     {
         interpolate_chroma(enc, mb_abs_mv(enc, enc->mb.mv[0]));
