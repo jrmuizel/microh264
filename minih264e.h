@@ -229,7 +229,6 @@ void H264E_set_vbv_state(
 #define H264E_ENABLE_PLAIN_C 1
 #endif
 
-#define H264E_CONFIGS_COUNT ((H264E_ENABLE_SSE2) + (H264E_ENABLE_PLAIN_C) + (H264E_ENABLE_NEON))
 
 #if defined(__ARMCC_VERSION) || defined(_WIN32) || defined(__EMSCRIPTEN__)
 #define __BYTE_ORDER 0
@@ -2680,131 +2679,6 @@ loop_enter:
 /************************************************************************/
 /*      Declare exported functions for each configuration               */
 /************************************************************************/
-#if !H264E_CONFIGS_COUNT
-#   error no build configuration defined
-#elif H264E_CONFIGS_COUNT == 1
-//  Exactly one configuration: append config suffix to exported names
-#else //if H264E_CONFIGS_COUNT > 1
-//  Several configurations: use Virtual Functions Table (VFT)
-typedef struct
-{
-#   define  H264E_API(type, name, args) type (*name) args;
-// h264e_qpel
-H264E_API(void, h264e_qpel_interpolate_chroma, (const uint8_t *src,int src_stride, uint8_t *h264e_restrict dst,point_t wh, point_t dxdy))
-H264E_API(void, h264e_qpel_interpolate_luma, (const uint8_t *src,int src_stride, uint8_t *h264e_restrict dst,point_t wh, point_t dxdy))
-H264E_API(void, h264e_qpel_average_wh_align, (const uint8_t *p0, const uint8_t *p1, uint8_t *h264e_restrict d, point_t wh))
-// h264e_deblock
-H264E_API(void, h264e_deblock_chroma, (uint8_t *pSrcDst, int32_t srcdstStep, const deblock_params_t *par))
-H264E_API(void, h264e_deblock_luma, (uint8_t *pSrcDst, int32_t srcdstStep, const deblock_params_t *par))
-// h264e_intra
-H264E_API(void, h264e_intra_predict_chroma,  (pix_t *predict, const pix_t *left, const pix_t *top, int mode))
-H264E_API(void, h264e_intra_predict_16x16, (pix_t *predict, const pix_t *left, const pix_t *top, int mode))
-H264E_API(int,  h264e_intra_choose_4x4, (const pix_t *blockin, pix_t *blockpred, int avail, const pix_t *edge, int mpred, int penalty))
-// h264e_cavlc
-H264E_API(void,     h264e_bs_put_bits, (bs_t *bs, unsigned n, unsigned val))
-H264E_API(void,     h264e_bs_flush, (bs_t *bs))
-H264E_API(unsigned, h264e_bs_get_pos_bits, (const bs_t *bs))
-H264E_API(unsigned, h264e_bs_byte_align, (bs_t *bs))
-H264E_API(void,     h264e_bs_put_golomb, (bs_t *bs, unsigned val))
-H264E_API(void,     h264e_bs_put_sgolomb, (bs_t *bs, int val))
-H264E_API(void,     h264e_bs_init_bits, (bs_t *bs, void *data))
-H264E_API(void,     h264e_vlc_encode, (bs_t *bs, int16_t *quant, int maxNumCoeff, uint8_t *nz_ctx))
-// h264e_sad
-H264E_API(int,  h264e_sad_mb_unlaign_8x8, (const pix_t *a, int a_stride, const pix_t *b, int sad[4]))
-H264E_API(int,  h264e_sad_mb_unlaign_wh, (const pix_t *a, int a_stride, const pix_t *b, point_t wh))
-H264E_API(void, h264e_copy_8x8, (pix_t *d, int d_stride, const pix_t *s))
-H264E_API(void, h264e_copy_16x16, (pix_t *d, int d_stride, const pix_t *s, int s_stride))
-H264E_API(void, h264e_copy_borders, (unsigned char *pic, int w, int h, int guard))
-// h264e_transform
-H264E_API(void, h264e_transform_add, (pix_t *out, int out_stride, const pix_t *pred, quant_t *q, int side, int32_t mask))
-H264E_API(int,  h264e_transform_sub_quant_dequant, (const pix_t *inp, const pix_t *pred, int inp_stride, int mode, quant_t *q, const uint16_t *qdat))
-H264E_API(void, h264e_quant_luma_dc, (quant_t *q, int16_t *deq, const uint16_t *qdat))
-H264E_API(int,  h264e_quant_chroma_dc, (quant_t *q, int16_t *deq, const uint16_t *qdat))
-#   undef H264E_API
-} vft_t;
-
-// non-const VFT, run-time initialized
-static const vft_t *g_vft;
-
-// const VFT for each supported build config
-static const vft_t g_vft_plain_c =
-{
-#define  H264E_API(type, name, args) name,
-// h264e_qpel
-H264E_API(void, h264e_qpel_interpolate_chroma, (const uint8_t *src,int src_stride, uint8_t *h264e_restrict dst,point_t wh, point_t dxdy))
-H264E_API(void, h264e_qpel_interpolate_luma, (const uint8_t *src,int src_stride, uint8_t *h264e_restrict dst,point_t wh, point_t dxdy))
-H264E_API(void, h264e_qpel_average_wh_align, (const uint8_t *p0, const uint8_t *p1, uint8_t *h264e_restrict d, point_t wh))
-// h264e_deblock
-H264E_API(void, h264e_deblock_chroma, (uint8_t *pSrcDst, int32_t srcdstStep, const deblock_params_t *par))
-H264E_API(void, h264e_deblock_luma, (uint8_t *pSrcDst, int32_t srcdstStep, const deblock_params_t *par))
-// h264e_intra
-H264E_API(void, h264e_intra_predict_chroma,  (pix_t *predict, const pix_t *left, const pix_t *top, int mode))
-H264E_API(void, h264e_intra_predict_16x16, (pix_t *predict, const pix_t *left, const pix_t *top, int mode))
-H264E_API(int,  h264e_intra_choose_4x4, (const pix_t *blockin, pix_t *blockpred, int avail, const pix_t *edge, int mpred, int penalty))
-// h264e_cavlc
-H264E_API(void,     h264e_bs_put_bits, (bs_t *bs, unsigned n, unsigned val))
-H264E_API(void,     h264e_bs_flush, (bs_t *bs))
-H264E_API(unsigned, h264e_bs_get_pos_bits, (const bs_t *bs))
-H264E_API(unsigned, h264e_bs_byte_align, (bs_t *bs))
-H264E_API(void,     h264e_bs_put_golomb, (bs_t *bs, unsigned val))
-H264E_API(void,     h264e_bs_put_sgolomb, (bs_t *bs, int val))
-H264E_API(void,     h264e_bs_init_bits, (bs_t *bs, void *data))
-H264E_API(void,     h264e_vlc_encode, (bs_t *bs, int16_t *quant, int maxNumCoeff, uint8_t *nz_ctx))
-// h264e_sad
-H264E_API(int,  h264e_sad_mb_unlaign_8x8, (const pix_t *a, int a_stride, const pix_t *b, int sad[4]))
-H264E_API(int,  h264e_sad_mb_unlaign_wh, (const pix_t *a, int a_stride, const pix_t *b, point_t wh))
-H264E_API(void, h264e_copy_8x8, (pix_t *d, int d_stride, const pix_t *s))
-H264E_API(void, h264e_copy_16x16, (pix_t *d, int d_stride, const pix_t *s, int s_stride))
-H264E_API(void, h264e_copy_borders, (unsigned char *pic, int w, int h, int guard))
-// h264e_transform
-H264E_API(void, h264e_transform_add, (pix_t *out, int out_stride, const pix_t *pred, quant_t *q, int side, int32_t mask))
-H264E_API(int,  h264e_transform_sub_quant_dequant, (const pix_t *inp, const pix_t *pred, int inp_stride, int mode, quant_t *q, const uint16_t *qdat))
-H264E_API(void, h264e_quant_luma_dc, (quant_t *q, int16_t *deq, const uint16_t *qdat))
-H264E_API(int,  h264e_quant_chroma_dc, (quant_t *q, int16_t *deq, const uint16_t *qdat))
-#undef H264E_API
-};
-
-/************************************************************************/
-/*      Code to detect CPU features and init VFT                        */
-/************************************************************************/
-
-
-static void init_vft(void)
-{
-    g_vft = &g_vft_plain_c;
-}
-
-#define MAP_NAME(name) g_vft->name
-
-#endif
-
-#ifdef MAP_NAME
-#   define h264e_qpel_interpolate_chroma     MAP_NAME(h264e_qpel_interpolate_chroma)
-#   define h264e_qpel_interpolate_luma       MAP_NAME(h264e_qpel_interpolate_luma)
-#   define h264e_qpel_average_wh_align       MAP_NAME(h264e_qpel_average_wh_align)
-#   define h264e_deblock_chroma              MAP_NAME(h264e_deblock_chroma)
-#   define h264e_deblock_luma                MAP_NAME(h264e_deblock_luma)
-#   define h264e_intra_predict_chroma        MAP_NAME(h264e_intra_predict_chroma)
-#   define h264e_intra_predict_16x16         MAP_NAME(h264e_intra_predict_16x16)
-#   define h264e_intra_choose_4x4            MAP_NAME(h264e_intra_choose_4x4)
-#   define h264e_bs_put_bits                 MAP_NAME(h264e_bs_put_bits)
-#   define h264e_bs_flush                    MAP_NAME(h264e_bs_flush)
-#   define h264e_bs_get_pos_bits             MAP_NAME(h264e_bs_get_pos_bits)
-#   define h264e_bs_byte_align               MAP_NAME(h264e_bs_byte_align)
-#   define h264e_bs_put_golomb               MAP_NAME(h264e_bs_put_golomb)
-#   define h264e_bs_put_sgolomb              MAP_NAME(h264e_bs_put_sgolomb)
-#   define h264e_bs_init_bits                MAP_NAME(h264e_bs_init_bits)
-#   define h264e_vlc_encode                  MAP_NAME(h264e_vlc_encode)
-#   define h264e_sad_mb_unlaign_8x8          MAP_NAME(h264e_sad_mb_unlaign_8x8)
-#   define h264e_sad_mb_unlaign_wh           MAP_NAME(h264e_sad_mb_unlaign_wh)
-#   define h264e_copy_8x8                    MAP_NAME(h264e_copy_8x8)
-#   define h264e_copy_16x16                  MAP_NAME(h264e_copy_16x16)
-#   define h264e_copy_borders                MAP_NAME(h264e_copy_borders)
-#   define h264e_transform_add               MAP_NAME(h264e_transform_add)
-#   define h264e_transform_sub_quant_dequant MAP_NAME(h264e_transform_sub_quant_dequant)
-#   define h264e_quant_luma_dc               MAP_NAME(h264e_quant_luma_dc)
-#   define h264e_quant_chroma_dc             MAP_NAME(h264e_quant_chroma_dc)
-#endif
 
 /************************************************************************/
 /*      Arithmetics                                                     */
@@ -5204,9 +5078,6 @@ static int H264E_sizeof_one(const H264E_create_param_t *par, int *sizeof_persist
 static int H264E_init_one(h264e_enc_t *enc, const H264E_create_param_t *opt, int inp_buf_flag)
 {
     pix_t *base;
-#if H264E_CONFIGS_COUNT > 1
-    init_vft();
-#endif
     memset(enc, 0, sizeof(*enc));
 
     enc->frame.nmbx = (opt->width  + 15) >> 4;
