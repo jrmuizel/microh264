@@ -811,30 +811,6 @@ static uint32_t intra_predict_dc(const pix_t *left, const pix_t *top, int log_si
     return dc * 0x01010101;
 }
 
-/*
- * Note: To make the code more readable we refer to the neighboring pixels
- * in variables named as below:
- *
- *    UL U0 U1 U2 U3 U4 U5 U6 U7
- *    L0 xx xx xx xx
- *    L1 xx xx xx xx
- *    L2 xx xx xx xx
- *    L3 xx xx xx xx
- */
-#define UL edge[-1]
-#define U0 edge[0]
-#define T1 edge[1]
-#define U2 edge[2]
-#define U3 edge[3]
-#define U4 edge[4]
-#define U5 edge[5]
-#define U6 edge[6]
-#define U7 edge[7]
-#define L0 edge[-2]
-#define L1 edge[-3]
-#define L2 edge[-4]
-#define L3 edge[-5]
-
 static void h264e_intra_predict_16x16(pix_t *predict, const pix_t *left, const pix_t *top)
 {
     int cloop = 16;
