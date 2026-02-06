@@ -907,6 +907,9 @@ static void copy_wh(const uint8_t *src, int src_stride, uint8_t *dst, int w, int
     }
 }
 
+// Bilinear chroma interpolation is still needed even though luma MVs are
+// full-pel only, because in 4:2:0 the chroma plane is half resolution,
+// so a full-pel luma MV produces a half-pel chroma offset.
 static void h264e_qpel_interpolate_chroma(const uint8_t *src, int src_stride, uint8_t *h264e_restrict dst, point_t wh, point_t dxdy)
 {
     /* if fractionl mv is not (0, 0) */
