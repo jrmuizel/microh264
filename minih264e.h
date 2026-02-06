@@ -514,7 +514,6 @@ typedef struct H264E_persist_tag
     pix_t *pbest;                   // Macroblock best predictor
     pix_t *ptest;                   // Macroblock predictor under test
 
-    point_t mv_clusters[2];         // MV clusterization for prediction
 
 } h264e_enc_t;
 
@@ -1731,8 +1730,6 @@ loop_enter:
 #define SE(v)  h264e_bs_put_sgolomb(enc->bs, v)
 #define SWAP(datatype, a, b) { datatype _ = a; a = b; b = _; }
 #define SQR(x) ((x)*(x))
-#define SQRP(pnt) SQR(pnt.s.x) + SQR(pnt.s.y)
-#define SMOOTH(smth, p) smth.s.x = (63*smth.s.x + p.s.x + 32) >> 6;  smth.s.y = (63*smth.s.y + p.s.y + 32) >> 6;
 #define MUL_LAMBDA(x, lambda) ((x)*(lambda) >> 4)
 
 /************************************************************************/
@@ -2815,27 +2812,6 @@ static int me_mv_refine_cand(point_t *p, int n)
 }
 
 /**
-*   Online MV clustering to "long" and "short" clusters
-*   Estimate mean "long" and "short" vectors
-*/
-static void mv_clusters_update(h264e_enc_t *enc, point_t mv)
-{
-    int mv_norm = SQRP(mv);
-    int n0 = SQRP(enc->mv_clusters[0]);
-    int n1 = SQRP(enc->mv_clusters[1]);
-    if (mv_norm < n1)
-    {
-        // "short" is shorter than "long"
-        SMOOTH(enc->mv_clusters[0], mv);
-    }
-    if (mv_norm >= n0)
-    {
-        // "long" is longer than "short"
-        SMOOTH(enc->mv_clusters[1], mv);
-    }
-}
-
-/**
 *   Choose inter mode: ME partition, find MV
 */
 static void inter_choose_mode(h264e_enc_t *enc)
@@ -2862,9 +2838,6 @@ static void inter_choose_mode(h264e_enc_t *enc)
     {
         mv_cand[ncand++] = point(0, 8*4);
     }
-
-    mv_cand[ncand++] = enc->mv_clusters[0];
-    mv_cand[ncand++] = enc->mv_clusters[1];
 
     assert(ncand <= MAX_MV_CAND);
     ncand = me_mv_refine_cand(mv_cand, ncand);
@@ -2974,11 +2947,6 @@ static void mb_encode(h264e_enc_t *enc)
     if (enc->mb.type >= 0)
     {
         intra_choose_16x16(enc, left, top);
-    }
-
-    if (enc->mb.type < 6)
-    {
-        mv_clusters_update(enc, enc->mb.mv[0]);
     }
 
     if (enc->mb.type >= 6)
