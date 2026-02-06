@@ -2015,54 +2015,17 @@ static point_t point_median_of_3(point_t a, point_t b, point_t c)
 /**
 *   Save state of the MV predictor
 */
-static void me_mv_medianpredictor_save_ctx(h264e_enc_t *enc, point_t *ctx)
+static void me_mv_medianpredictor_put(h264e_enc_t *enc, point_t mv)
 {
     int i;
     point_t *mvtop = enc->mv_pred + 8 + enc->mb.x*4;
+    enc->mv_pred[4] = mvtop[3];           // top-left = old top-right
+    for (i = 1; i < 4; i++)
+        enc->mv_pred[4 + i] = mv;
     for (i = 0; i < 4; i++)
     {
-        *ctx++ = enc->mv_pred[i];
-        *ctx++ = enc->mv_pred[4 + i];
-        *ctx++ = mvtop[i];
-    }
-}
-
-/**
-*   Restore state of the MV predictor
-*/
-static void me_mv_medianpredictor_restore_ctx(h264e_enc_t *enc, const point_t *ctx)
-{
-    int i;
-    point_t *mvtop = enc->mv_pred + 8 + enc->mb.x*4;
-    for (i = 0; i < 4; i++)
-    {
-        enc->mv_pred[i] = *ctx++;
-        enc->mv_pred[4 + i] = *ctx++;
-        mvtop[i] = *ctx++;
-    }
-}
-
-/**
-*   Use given motion vector for prediction
-*/
-static void me_mv_medianpredictor_put(h264e_enc_t *enc, int x, int y, int w, int h, point_t mv)
-{
-    int i;
-    point_t *mvtop = enc->mv_pred + 8 + enc->mb.x*4;
-    assert(y < 4 && x < 4);
-
-    enc->mv_pred[4 + y] = mvtop[x + w-1]; // top-left corner = top-right corner
-    for (i = 1; i < h; i++)
-    {
-        enc->mv_pred[4 + y + i] = mv;     // top-left corner(s) for next row(s) = this
-    }
-    for (i = 0; i < h; i++)
-    {
-        enc->mv_pred[y + i] = mv;         // left = this
-    }
-    for (i = 0; i < w; i++)
-    {
-        mvtop[x + i] = mv;                // top = this
+        enc->mv_pred[i] = mv;             // left = this
+        mvtop[i] = mv;                    // top = this
     }
 }
 
@@ -2497,12 +2460,12 @@ static void mb_write(h264e_enc_t *enc)
                 pred_mode_chroma ^= 2;
             }
             UE(pred_mode_chroma);
-            me_mv_medianpredictor_put(enc, 0, 0, 4, 4, point(MV_NA,0));
+            me_mv_medianpredictor_put(enc, point(MV_NA,0));
         } else
         {
             SE(enc->mb.mvd[0].s.x);
             SE(enc->mb.mvd[0].s.y);
-            me_mv_medianpredictor_put(enc, 0, 0, 4, 4, enc->mb.mv[0]);
+            me_mv_medianpredictor_put(enc, enc->mb.mv[0]);
             }
         cbp = cbpl + (cbpc << 4);
         if (enc->mb.type < 6)
@@ -2930,11 +2893,10 @@ static void inter_choose_mode(h264e_enc_t *enc)
     sad_best += me_mv_cost(mv_best, mv_pred_16x16, enc->rc.qp);
 
     {
-        point_t wh, mvpred_ctx[12];
+        point_t wh;
         pix_t *store = enc->scratch->mb_pix_store;
         pix_t *pred_best = store, *pred_test = store + 256;
 
-        me_mv_medianpredictor_save_ctx(enc, mvpred_ctx);
         enc->mb.cost = 0xffffff;
         {
             int part_sad = MUL_LAMBDA(1, g_lambda_q4[enc->rc.qp]);
@@ -2960,8 +2922,6 @@ static void inter_choose_mode(h264e_enc_t *enc)
 
             enc->mb.mvd[0] = mv_sub(mv, mv_pred);
             enc->mb.mv[0] = mv;
-
-            me_mv_medianpredictor_restore_ctx(enc, mvpred_ctx);
 
             if (part_sad < enc->mb.cost)
             {
