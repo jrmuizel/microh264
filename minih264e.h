@@ -1704,10 +1704,6 @@ loop_enter:
 
 #define MIN_QP          10   // Minimum QP
 
-#define MVPRED_MEDIAN   1
-#define MVPRED_L        2
-#define MVPRED_U        3
-#define MVPRED_UR       4
 #define MV_NA           0x8000
 #define AVAIL(mv)       ((mv).u32 != MV_NA)
 
@@ -2073,156 +2069,41 @@ static void me_mv_medianpredictor_put(h264e_enc_t *enc, int x, int y, int w, int
 /**
 *   Motion vector median predictor for non-skip macroblock, as defined in the standard
 */
-static point_t me_mv_medianpredictor_get(const h264e_enc_t *enc, point_t xy, point_t wh)
+static point_t me_mv_medianpredictor_get(const h264e_enc_t *enc)
 {
-    int x = xy.s.x >> 2;
-    int y = xy.s.y >> 2;
-    int w = wh.s.x >> 2;
-    int h = wh.s.y >> 2;
-    int mvPredType = MVPRED_MEDIAN;
     point_t a, b, c, d, ret = point(0, 0);
     point_t *mvtop = enc->mv_pred + 8 + enc->mb.x*4;
     int flag = enc->mb.avail;
 
-    assert(y < 4);
-    assert(x < 4);
-    assert(w <= 4);
-    assert(h <= 4);
+    a = enc->mv_pred[0];     // left
+    b = mvtop[0];            // top
+    c = mvtop[4];            // top-right
+    d = enc->mv_pred[4];     // top-left
 
-    a = enc->mv_pred[y];
-    b = mvtop[x];
-    c = mvtop[x + w];
-    d = enc->mv_pred[4 + y];
+    if (!(flag & AVAIL_L))   a.u32 = MV_NA;
+    if (!(flag & AVAIL_TL))  d.u32 = MV_NA;
+    if (!(flag & AVAIL_T))   b.u32 = MV_NA;
+    if (!(flag & AVAIL_TR))  c = d;  // top-left replaces top-right when unavailable
 
-    if (!x)
-    {
-        if (!(flag & AVAIL_L))
-        {
-            a.u32 = MV_NA;
-        }
-        if (!(flag & AVAIL_TL))
-        {
-            d.u32 = MV_NA;
-        }
-    }
-    if (!y)
-    {
-        if (!(flag & AVAIL_T))
-        {
-            b.u32 = MV_NA;
-            if (x + w < 4)
-            {
-                c.u32 = MV_NA;
-            }
-            if (x > 0)
-            {
-                d.u32 = MV_NA;
-            }
-        }
-        if (!(flag & AVAIL_TL) && !x)
-        {
-            d.u32 = MV_NA;
-        }
-        if (!(flag & AVAIL_TR) && x + w == 4)
-        {
-            c.u32 = MV_NA;
-        }
-    }
-
-    if (x + w == 4 && (!(flag & AVAIL_TR) || y))
-    {
-        c = d;
-    }
-
+    // Single-neighbor special cases (H.264 spec 8.4.1.3)
     if (AVAIL(a) && !AVAIL(b) && !AVAIL(c))
-    {
-        mvPredType = MVPRED_L;
-    } else if (!AVAIL(a) && AVAIL(b) && !AVAIL(c))
-    {
-        mvPredType = MVPRED_U;
-    } else if (!AVAIL(a) && !AVAIL(b) && AVAIL(c))
-    {
-        mvPredType = MVPRED_UR;
-    }
+        return a;
+    if (!AVAIL(a) && AVAIL(b) && !AVAIL(c))
+        return b;
+    if (!AVAIL(a) && !AVAIL(b) && AVAIL(c))
+        return c;
 
-    // Directional predictions
-    if (w == 2 && h == 4)
+    // Median prediction (replace unavailable with zero)
+    if (!(AVAIL(b) || AVAIL(c)))
     {
-        if (x == 0)
-        {
-            if (AVAIL(a))
-            {
-                mvPredType = MVPRED_L;
-            }
-        } else
-        {
-            if (AVAIL(c))
-            {
-                mvPredType = MVPRED_UR;
-            }
-        }
-    } else if (w == 4 && h == 2)
-    {
-        if (y == 0)
-        {
-            if (AVAIL(b))
-            {
-                mvPredType = MVPRED_U;
-            }
-        } else
-        {
-            if (AVAIL(a))
-            {
-                mvPredType = MVPRED_L;
-            }
-        }
-    }
-
-    switch(mvPredType)
-    {
-    default:
-    case MVPRED_MEDIAN:
-        if (!(AVAIL(b) || AVAIL(c)))
-        {
-            if (AVAIL(a))
-            {
-                ret = a;
-            }
-        } else
-        {
-            if (!AVAIL(a))
-            {
-                a = ret;
-            }
-            if (!AVAIL(b))
-            {
-                b = ret;
-            }
-            if (!AVAIL(c))
-            {
-                c = ret;
-            }
-            ret = point_median_of_3(a, b, c);
-        }
-        break;
-    case MVPRED_L:
         if (AVAIL(a))
-        {
             ret = a;
-        }
-        break;
-    case MVPRED_U:
-        if (AVAIL(b))
-        {
-            ret = b;
-        }
-        break;
-    case MVPRED_UR:
-        if (AVAIL(c))
-        {
-            ret = c;
-        }
-        break;
+    } else
+    {
+        if (!AVAIL(a)) a = ret;
+        if (!AVAIL(b)) b = ret;
+        if (!AVAIL(c)) c = ret;
+        ret = point_median_of_3(a, b, c);
     }
     return ret;
 }
@@ -2997,7 +2878,7 @@ static void mv_clusters_update(h264e_enc_t *enc, point_t mv)
 static void inter_choose_mode(h264e_enc_t *enc)
 {
     point_t mv_cand[MAX_MV_CAND];
-    point_t mv_pred_16x16 = me_mv_medianpredictor_get(enc, point(0, 0), point(16, 16));
+    point_t mv_pred_16x16 = me_mv_medianpredictor_get(enc);
     point_t mv_best = point(MV_NA, 0); // avoid warning
 
     int sad, sad_best = 0x7FFFFFFF;
@@ -3065,7 +2946,7 @@ static void inter_choose_mode(h264e_enc_t *enc)
             wh.s.y = 16;
             me_mv_set_range(&mvabs, &range, &enc->frame.mv_limit, enc->mb.y*16*4);
 
-            mv_pred = me_mv_medianpredictor_get(enc, point(0, 0), wh);
+            mv_pred = me_mv_medianpredictor_get(enc);
 
             part_sad += me_search_diamond(ref_yuv,
                 enc->scratch->mb_pix_inp, ref_stride, &mvabs, &range, enc->rc.qp,
