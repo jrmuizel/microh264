@@ -2016,7 +2016,10 @@ static void me_mv_medianpredictor_put(h264e_enc_t *enc, point_t mv)
 }
 
 /**
-*   Motion vector median predictor for non-skip macroblock, as defined in the standard
+*   Motion vector median predictor (H.264 spec 8.4.1.3).
+*   The decoder reconstructs MVs as mv = mvd + mv_pred, so the encoder must
+*   compute the same predictor to transmit the correct mvd. Also used as the
+*   starting point for diamond search and for MV encoding cost estimation.
 */
 static point_t me_mv_medianpredictor_get(const h264e_enc_t *enc)
 {
