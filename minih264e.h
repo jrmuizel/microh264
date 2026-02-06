@@ -363,7 +363,6 @@ if ((shift -= n) < 0)       \
 cache |= (uint32_t)val << shift;
 
 // Quantizer-dequantizer modes
-#define QDQ_MODE_INTRA_4   2       // intra 4x4
 #define QDQ_MODE_INTER     8       // inter
 #define QDQ_MODE_INTRA_16  (8 + 1) // intra 16x61
 #define QDQ_MODE_CHROMA    (4 + 1) // chroma
@@ -517,15 +516,13 @@ typedef struct H264E_persist_tag
         int skip_run;               // Skip run count
 
         // according to table 7-13
-        // -1 = skip, 0 = P16x16, 5 = I4x4, >=6 = I16x16
+        // -1 = skip, 0 = P16x16, >=6 = I16x16
         int type;                   // MB type
 
         struct
         {
             int pred_mode_luma;     // Intra 16x16 prediction mode
         } i16;
-
-        int8_t i4x4_mode[16];       // Intra 4x4 prediction modes
 
         int cost;                   // Best coding cost
         int avail;                  // Neighbor availability flags
@@ -594,7 +591,6 @@ typedef struct H264E_persist_tag
     // predictors contexts
     point_t *mv_pred;               // MV for left&top 4x4 blocks
     uint8_t *nnz;                   // Number of non-zero coeffs per 4x4 block for left&top
-    int32_t *i4x4mode;              // Intra 4x4 mode for left&top
     pix_t *top_line;                // left&top neighbor pixels
 
     // output data
@@ -909,16 +905,6 @@ ADJUSTABLE uint16_t g_lambda_mv_q4[52] =
     697, 697,
 };
 
-ADJUSTABLE uint16_t g_skip_thr_i4x4[52] =
-{
-    0,1,2,3,4,5,6,7,8,9,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
-    44, 44, 44, 44, 44, 44, 44, 44, 44, 44,
-    68, 68, 68, 68, 68, 68, 68, 68, 68, 68,
-    100, 100,
-};
-
 ADJUSTABLE uint16_t g_deadzonei[] = {
     3419, 3419, 3419, 3419, 3419, 3419, 3419, 3419, 3419, 3419,
     30550, 8845, 14271, 19698, 25124,
@@ -930,19 +916,6 @@ ADJUSTABLE uint16_t g_deadzonei[] = {
     24661, 19729, 14797, 9865, 4933,
     24661, 3499, 6997, 10495, 13993,
     17491, 17491,
-};
-
-ADJUSTABLE uint16_t g_lambda_i4_q4[] = {
-    27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
-    27, 31, 34, 38, 41,
-    45, 76, 106, 137, 167,
-    198, 220, 243, 265, 288,
-    310, 347, 384, 421, 458,
-    495, 584, 673, 763, 852,
-    941, 1053, 1165, 1276, 1388,
-    1500, 1205, 910, 614, 319,
-    5000, 1448, 2872, 4296, 5720,
-    7144, 7144,
 };
 
 ADJUSTABLE uint16_t g_lambda_i16_q4[] = {
@@ -1475,198 +1448,7 @@ static void h264e_intra_predict_chroma(pix_t *predict, const pix_t *left, const 
             d += 4;
         } while(--ccloop);
     }
-}
-
-static int pix_sad_4(uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3,
-                     uint32_t x0, uint32_t x1, uint32_t x2, uint32_t x3)
-{
-#if defined(__arm__)
-    int sad = __usad8(r0, x0);
-    sad = __usada8(r1, x1, sad);
-    sad = __usada8(r2, x2, sad);
-    sad = __usada8(r3, x3, sad);
-    return sad;
-#else
-    int c, sad = 0;
-    for (c = 0; c < 4; c++)
-    {
-        int d = (r0 & 0xff) - (x0 & 0xff); r0 >>= 8; x0 >>= 8;
-        sad += ABS(d);
-    }
-    for (c = 0; c < 4; c++)
-    {
-        int d = (r1 & 0xff) - (x1 & 0xff); r1 >>= 8; x1 >>= 8;
-        sad += ABS(d);
-    }
-    for (c = 0; c < 4; c++)
-    {
-        int d = (r2 & 0xff) - (x2 & 0xff); r2 >>= 8; x2 >>= 8;
-        sad += ABS(d);
-    }
-    for (c = 0; c < 4; c++)
-    {
-        int d = (r3 & 0xff) - (x3 & 0xff); r3 >>= 8; x3 >>= 8;
-        sad += ABS(d);
-    }
-    return sad;
-#endif
-}
-
-static int h264e_intra_choose_4x4(const pix_t *blockin, pix_t *blockpred, int avail, const pix_t *edge, int mpred, int penalty)
-{
-    int sad, best_sad, best_m = 2;
-
-    uint32_t r0, r1, r2, r3;
-    uint32_t x0, x1, x2, x3, x;
-
-    r0 = ((uint32_t *)blockin)[ 0];
-    r1 = ((uint32_t *)blockin)[ 4];
-    r2 = ((uint32_t *)blockin)[ 8];
-    r3 = ((uint32_t *)blockin)[12];
-#undef TEST
-#define TEST(mode) sad = pix_sad_4(r0, r1, r2, r3, x0, x1, x2, x3); \
-        if (mode != mpred) sad += penalty;    \
-        if (sad < best_sad)                   \
-        {                                     \
-            ((uint32_t *)blockpred)[ 0] = x0; \
-            ((uint32_t *)blockpred)[ 4] = x1; \
-            ((uint32_t *)blockpred)[ 8] = x2; \
-            ((uint32_t *)blockpred)[12] = x3; \
-            best_sad = sad;                   \
-            best_m = mode;                    \
-        }
-
-    // DC
-    x0 = x1 = x2 = x3 = intra_predict_dc((avail & AVAIL_L) ? &L3 : 0, (avail & AVAIL_T) ? &U0 : 0, 2);
-    best_sad = pix_sad_4(r0, r1, r2, r3, x0, x1, x2, x3);
-    if (2 != mpred)
-    {
-        best_sad += penalty;
-    }
-    ((uint32_t *)blockpred)[ 0] = x0;
-    ((uint32_t *)blockpred)[ 4] = x1;
-    ((uint32_t *)blockpred)[ 8] = x2;
-    ((uint32_t *)blockpred)[12] = x3;
-
-
-    if (avail & AVAIL_T)
-    {
-        uint32_t save = *(uint32_t*)&U4;
-        if (!(avail & AVAIL_TR))
-        {
-            *(uint32_t*)&U4 = U3*0x01010101u;
-        }
-
-        x0 = x1 = x2 = x3 = *(uint32_t*)&U0;
-        TEST(0)
-
-        x  = ((U6 + 3u*U7      + 2u) >> 2) << 24;
-        x |= ((U5 + 2u*U6 + U7 + 2u) >> 2) << 16;
-        x |= ((U4 + 2u*U5 + U6 + 2u) >> 2) << 8;
-        x |= ((U3 + 2u*U4 + U5 + 2u) >> 2);
-
-        x3 = x;
-        x = (x << 8) | ((U2 + 2u*U3 + U4 + 2u) >> 2);
-        x2 = x;
-        x = (x << 8) | ((T1 + 2u*U2 + U3 + 2u) >> 2);
-        x1 = x;
-        x = (x << 8) | ((U0 + 2u*T1 + U2 + 2u) >> 2);
-        x0 = x;
-        TEST(3)
-
-        x3 = x1;
-        x1 = x0;
-
-        x  = ((U4 + U5 + 1u) >> 1) << 24;
-        x |= ((U3 + U4 + 1u) >> 1) << 16;
-        x |= ((U2 + U3 + 1u) >> 1) << 8;
-        x |= ((T1 + U2 + 1u) >> 1);
-        x2 = x;
-        x = (x << 8) | ((U0 + T1 + 1) >> 1);
-        x0 = x;
-        TEST(7)
-
-        *(uint32_t*)&U4 = save;
-    }
-
-    if (avail & AVAIL_L)
-    {
-        x0 = 0x01010101u * L0;
-        x1 = 0x01010101u * L1;
-        x2 = 0x01010101u * L2;
-        x3 = 0x01010101u * L3;
-        TEST(1)
-
-        x = x3;
-        x <<= 16;
-        x |= ((L2 + 3u*L3 + 2u) >> 2) << 8;
-        x |= ((L2 + L3 + 1u) >> 1);
-        x2 = x;
-        x <<= 16;
-        x |= ((L1 + 2u*L2 + L3 + 2u) >> 2) << 8;
-        x |= ((L1 + L2 + 1u) >> 1);
-        x1 = x;
-        x <<= 16;
-        x |= ((L0 + 2u*L1 + L2 + 2u) >> 2) << 8;
-        x |= ((L0 + L1 + 1u) >> 1);
-        x0 = x;
-        TEST(8)
-    }
-
-    if ((avail & (AVAIL_T | AVAIL_L | AVAIL_TL)) == (AVAIL_T | AVAIL_L | AVAIL_TL))
-    {
-        uint32_t line0, line3;
-        x  = ((U3 + 2u*U2 + T1 + 2u) >> 2) << 24;
-        x |= ((U2 + 2u*T1 + U0 + 2u) >> 2) << 16;
-        x |= ((T1 + 2u*U0 + UL + 2u) >> 2) << 8;
-        x |= ((U0 + 2u*UL + L0 + 2u) >> 2);
-        line0 = x;
-        x0 = x;
-        x = (x << 8) | ((UL + 2u*L0 + L1 + 2u) >> 2);
-        x1 = x;
-        x = (x << 8) | ((L0 + 2u*L1 + L2 + 2u) >> 2);
-        x2 = x;
-        x = (x << 8) | ((L1 + 2u*L2 + L3 + 2u) >> 2);
-        x3 = x;
-        line3 = x;
-        TEST(4)
-
-        x = x0 << 8;
-        x |= ((UL + L0 + 1u) >> 1);
-        x0 = x;
-        x <<= 8;
-        x |= (line3 >> 16) & 0xff;
-        x <<= 8;
-        x |= ((L0 + L1 + 1u) >> 1);
-        x1 = x;
-        x <<= 8;
-        x |= (line3 >> 8) & 0xff;
-        x <<= 8;
-        x |= ((L1 + L2 + 1u) >> 1);
-        x2 = x;
-        x <<= 8;
-        x |= line3 & 0xff;
-        x <<= 8;
-        x |= ((L2 + L3 + 1u) >> 1);
-        x3 = x;
-        TEST(6)
-
-        x1 = line0;
-        x3 = (x1 << 8) | ((line3 >> 8) & 0xFF);
-
-        x  = ((U2 + U3 + 1u) >> 1) << 24;
-        x |= ((T1 + U2 + 1u) >> 1) << 16;
-        x |= ((U0 + T1 + 1u) >> 1) << 8;
-        x |= ((UL + U0 + 1u) >> 1);
-        x0 = x;
-        x = (x << 8) | ((line3 >> 16) & 0xFF);
-        x2 = x;
-        TEST(5)
-    }
-    return best_m + (best_sad << 4);
-}
-
-static uint8_t byteclip(int x)
+}static uint8_t byteclip(int x)
 {
     if (x > 255) x = 255;
     if (x < 0) x = 0;
@@ -3446,7 +3228,6 @@ static void encode_slice_header(h264e_enc_t *enc, int frame_type, int pps_id)
     // slice reset
     enc->slice.start_mb_num = enc->mb.num;
     enc->mb.skip_run = 0;
-    memset(enc->i4x4mode, -1, (enc->frame.nmbx + 1)*4);
     memset(enc->nnz, NNZ_NA, (enc->frame.nmbx + 1)*8);    // DF ignore slice borders, but uses it's own nnz's
 
     nal_start(enc, (frame_type == H264E_FRAME_TYPE_KEY ? 5 : 1) | 0x60);
@@ -3501,11 +3282,6 @@ static void mb_write(h264e_enc_t *enc)
     uint8_t *nnz_top = enc->nnz + 8 + enc->mb.x*8;
     uint8_t *nnz_left = enc->nnz;
 
-    if (enc->mb.type != 5)
-    {
-        enc->i4x4mode[0] = enc->i4x4mode[enc->mb.x + 1] = 0x02020202;
-    }
-
     enc->df.nzflag = ((enc->df.nzflag >> 4) & 0x84210) | enc->df.df_nzflag[enc->mb.x];
     for (i = 0; i < 4; i++)
     {
@@ -3535,7 +3311,6 @@ l_skip:
         h264e_copy_8x8(enc->dec.yuv[2], enc->dec.stride[2], enc->ptest + 8);
     } else
     {
-        if (enc->mb.type != 5)
         {
             unsigned nz_mask;
             nz_mask = h264e_transform_sub_quant_dequant(qv->mb_pix_inp, enc->pbest, 16, intra16x16_flag ? QDQ_MODE_INTRA_16 : QDQ_MODE_INTER, qv->qy, enc->rc.qdat[0]);
@@ -3622,7 +3397,7 @@ l_skip:
             }
             mb_type += enc->mb.i16.pred_mode_luma + cbpc*4 + (cbpl ? 12 : 0);
         }
-        if (mb_type >= 5 && enc->slice.type == SLICE_TYPE_I)    // Intra in I slice
+        if (mb_type >= 6 && enc->slice.type == SLICE_TYPE_I)    // Intra in I slice
         {
             mb_type -= 5;
         }
@@ -3635,49 +3410,31 @@ l_skip:
 
         UE(mb_type);
 
+        if (enc->mb.type >= 6)   // intra 16x16
         {
-            if (enc->mb.type >= 5)   // intra
+            int pred_mode_chroma = enc->mb.i16.pred_mode_luma;
+            if (!(pred_mode_chroma&1))
             {
-                int pred_mode_chroma;
-                if (enc->mb.type == 5)  // intra 4x4
-                {
-                    for (i = 0; i < 16; i++)
-                    {
-                        int m = enc->mb.i4x4_mode[decode_block_scan[i]];
-                        int nbits =  4;
-                        if (m < 0)
-                        {
-                            m = nbits = 1;
-                        }
-                        U(nbits, m);
-                    }
-                }
-                pred_mode_chroma = enc->mb.i16.pred_mode_luma;
-                if (!(pred_mode_chroma&1))
-                {
-                    pred_mode_chroma ^= 2;
-                }
-                UE(pred_mode_chroma);
-                me_mv_medianpredictor_put(enc, 0, 0, 4, 4, point(MV_NA,0));
-            } else
-            {
-                SE(enc->mb.mvd[0].s.x);
-                SE(enc->mb.mvd[0].s.y);
-                me_mv_medianpredictor_put(enc, 0, 0, 4, 4, enc->mb.mv[0]);
-                me_mv_dfmatrix_put(enc->df.df_mv, 0, 0, 4, 4, enc->mb.mv[0]);
+                pred_mode_chroma ^= 2;
             }
+            UE(pred_mode_chroma);
+            me_mv_medianpredictor_put(enc, 0, 0, 4, 4, point(MV_NA,0));
+        } else
+        {
+            SE(enc->mb.mvd[0].s.x);
+            SE(enc->mb.mvd[0].s.y);
+            me_mv_medianpredictor_put(enc, 0, 0, 4, 4, enc->mb.mv[0]);
+            me_mv_dfmatrix_put(enc->df.df_mv, 0, 0, 4, 4, enc->mb.mv[0]);
         }
         cbp = cbpl + (cbpc << 4);
         if (enc->mb.type < 6)
         {
-            // encode cbp 9.1.2 Mapping process for coded block pattern
-            static const uint8_t cbp2code[2][48] = {
-                {3, 29, 30, 17, 31, 18, 37,  8, 32, 38, 19,  9, 20, 10, 11,  2, 16, 33, 34, 21, 35, 22, 39,  4,
-                36, 40, 23,  5, 24,  6,  7,  1, 41, 42, 43, 25, 44, 26, 46, 12, 45, 47, 27, 13, 28, 14, 15,  0},
-                {0,  2,  3,  7,  4,  8, 17, 13,  5, 18,  9, 14, 10, 15, 16, 11,  1, 32, 33, 36, 34, 37, 44, 40,
-                35, 45, 38, 41, 39, 42, 43, 19,  6, 24, 25, 20, 26, 21, 46, 28, 27, 47, 22, 29, 23, 30, 31, 12}
+            // encode cbp 9.1.2 Mapping process for coded block pattern (inter table)
+            static const uint8_t cbp2code[48] = {
+                0,  2,  3,  7,  4,  8, 17, 13,  5, 18,  9, 14, 10, 15, 16, 11,  1, 32, 33, 36, 34, 37, 44, 40,
+                35, 45, 38, 41, 39, 42, 43, 19,  6, 24, 25, 20, 26, 21, 46, 28, 27, 47, 22, 29, 23, 30, 31, 12
             };
-            UE(cbp2code[enc->mb.type < 5][cbp]);
+            UE(cbp2code[cbp]);
         }
 
         if (cbp || (enc->mb.type >= 6))
@@ -3793,118 +3550,6 @@ l_skip:
 /**
 *   Estimate cost of 4x4 intra predictor
 */
-static void intra_choose_4x4(h264e_enc_t *enc)
-{
-    int i, n, a, nz_mask = 0, avail = mb_avail_flag(enc);
-    scratch_t *qv = enc->scratch;
-    pix_t *mb_dec = enc->dec.yuv[0];
-    pix_t *dec = enc->ptest;
-    int cost =  g_lambda_i4_q4[enc->rc.qp];// + MUL_LAMBDA(16, g_lambda_q4[enc->rc.qp]);    // 4x4 cost: at least 16 bits + penalty
-
-    uint32_t edge_store[(3 + 16 + 1 + 16 + 4)/4 + 2]; // pad for SSE
-    pix_t *edge = ((pix_t*)edge_store) + 3 + 16 + 1;
-    uint32_t *edge32 = (uint32_t *)edge;              // alias
-    const uint32_t *top32 = (const uint32_t*)(enc->top_line + 48 + enc->mb.x*32);
-    pix_t *left = enc->top_line;
-
-    edge[-1] = enc->top_line[32];
-    for (i = 0; i < 16; i++)
-    {
-        edge[-2 - i] = left[i];
-    }
-    for (i = 0; i < 4; i++)
-    {
-        edge32[i] = top32[i];
-    }
-    edge32[4] = top32[8];
-
-    for (n = 0; n < 16; n++)
-    {
-        static const uint8_t block2avail[16] = {
-            0x07, 0x23, 0x23, 0x2b, 0x9b, 0x77, 0xff, 0x77, 0x9b, 0xff, 0xff, 0x77, 0x9b, 0x77, 0xff, 0x77,
-        };
-        pix_t *block;
-        pix_t *blockin;
-        int sad, mpred, mode;
-        int r = n >> 2;
-        int c = n & 3;
-        int8_t *ctx_l = (int8_t *)enc->i4x4mode + r;
-        int8_t *ctx_t = (int8_t *)enc->i4x4mode + 4 + enc->mb.x*4 + c;
-        edge = ((pix_t*)edge_store) + 3 + 16 + 1 + 4*c - 4*r;
-
-        a = avail;
-        a &= block2avail[n];
-        a |= block2avail[n] >> 4;
-
-        if (!(block2avail[n] & AVAIL_TL)) // TL replace
-        {
-            if ((n <= 3 && (avail & AVAIL_T)) ||
-                (n  > 3 && (avail & AVAIL_L)))
-            {
-                a |= AVAIL_TL;
-            }
-        }
-        if (n < 3 && (avail & AVAIL_T))
-        {
-            a |= AVAIL_TR;
-        }
-
-        blockin = enc->scratch->mb_pix_inp + (c + r*16)*4;
-        block = dec + (c + r*16)*4;
-
-        mpred = MIN(*ctx_l, *ctx_t);
-        if (mpred < 0)
-        {
-            mpred = 2;
-        }
-
-        sad = h264e_intra_choose_4x4(blockin, block, a, edge, mpred, MUL_LAMBDA(3, g_lambda_q4[enc->rc.qp]));
-        mode = sad & 15;
-        sad >>= 4;
-
-        *ctx_l = *ctx_t = (int8_t)mode;
-        if (mode == mpred)
-        {
-            mode = -1;
-        } else if (mode > mpred)
-        {
-            mode--;
-        }
-        enc->mb.i4x4_mode[n] = (int8_t)mode;
-
-        nz_mask <<= 1;
-        if (sad > g_skip_thr_i4x4[enc->rc.qp])
-        {
-            //  skip transform on low SAD gains just about 2% for all-intra coding at QP40,
-            //  for other QP gain is minimal, so SAD check do not used
-            nz_mask |= h264e_transform_sub_quant_dequant(blockin, block, 16, QDQ_MODE_INTRA_4, qv->qy + n, enc->rc.qdat[0]);
-
-            if (nz_mask & 1)
-            {
-                h264e_transform_add(block, 16, block, qv->qy + n, 1, ~0);
-            }
-        } else
-        {
-            memset((qv->qy+n), 0, sizeof(qv->qy[0]));
-        }
-
-        cost += sad;
-
-        edge[2] = block[3];
-        edge[1] = block[3 + 16];
-        edge[0] = block[3 + 16*2];
-        *(uint32_t*)&edge[-4] = *(uint32_t*)&block[16*3];
-    }
-    enc->scratch->nz_mask = (uint16_t)nz_mask;
-
-    if (cost < enc->mb.cost)
-    {
-        enc->mb.cost = cost;
-        enc->mb.type = 5;   // intra 4x4
-        h264e_copy_16x16(mb_dec, enc->dec.stride[0], dec, 16);  // restore reference
-    }
-}
-
 /**
 *   Choose 16x16 prediction mode, most suitable for given gradient
 */
@@ -4505,7 +4150,7 @@ static void df_strength(deblock_filter_t *df, int mb_type, int mbx, uint8_t *str
     */
     (void)IntraBLFlag;
     {
-        if (mb_type < 5)
+        if (mb_type < 6)
         {
             int ccloop = 4;
             point_t *mv = df->df_mv;
@@ -4547,11 +4192,11 @@ static void df_strength(deblock_filter_t *df, int mb_type, int mbx, uint8_t *str
             ((uint32_t*)(sv))[1] = ((uint32_t*)(sv))[2] = ((uint32_t*)(sv))[3] =             // for inner columns
             ((uint32_t*)(sh))[1] = ((uint32_t*)(sh))[2] = ((uint32_t*)(sh))[3] = 0x03030303; // for inner rows
         }
-        if ((mb_type >= 5 || df->mb_type[mbx - 1] >= 5)) // speculative read
+        if ((mb_type >= 6 || df->mb_type[mbx - 1] >= 6)) // speculative read
         {
             ((uint32_t*)(strength))[0] = 0x04040404;    // Deblock mode #4 (strong intra) for left column
         }
-        if ((mb_type >= 5 || df->mb_type[mbx    ] >= 5))
+        if ((mb_type >= 6 || df->mb_type[mbx    ] >= 6))
         {
             ((uint32_t*)(strength))[4] = 0x04040404;    // Deblock mode #4 (strong intra) for top row
         }
@@ -4677,18 +4322,14 @@ static void mb_encode(h264e_enc_t *enc)
     if (enc->mb.type >= 0)
     {
         intra_choose_16x16(enc, left, top, avail);
-        if (enc->run_param.encode_speed < 2 || enc->slice.type != SLICE_TYPE_P) // enable intra4x4 on P slices
-        {
-            intra_choose_4x4(enc);
-        }
     }
 
-    if (enc->mb.type < 5)
+    if (enc->mb.type < 6)
     {
         mv_clusters_update(enc, enc->mb.mv[0]);
     }
 
-    if (enc->mb.type >= 5)
+    if (enc->mb.type >= 6)
     {
         pix_t *pred = enc->ptest;
         h264e_intra_predict_chroma(pred, left + 16, top + 16, enc->mb.i16.pred_mode_luma);
@@ -4999,7 +4640,6 @@ static int enc_alloc_scratch(h264e_enc_t *enc, const H264E_create_param_t *par, 
 
     ALLOC(enc->nnz, nmbx*8 + 8);
     ALLOC(enc->mv_pred, (nmbx*4 + 8)*sizeof(point_t));
-    ALLOC(enc->i4x4mode, nmbx*4 + 4);
     ALLOC(enc->df.df_qp, nmbx);
     ALLOC(enc->df.mb_type, nmbx);
     ALLOC(enc->df.df_nzflag, nmbx);
@@ -5144,7 +4784,6 @@ static void encode_slice(h264e_enc_t *enc, int frame_type, int pps_id)
         // start new row
         enc->mb.x = 0;
         *((uint32_t*)(enc->nnz)) = *((uint32_t*)(enc->nnz + 4)) = 0x01010101 * NNZ_NA; // left edge of NNZ predictor
-        enc->i4x4mode[0] = -1;
 
     } while (++enc->mb.y < enc->frame.nmby);
 
