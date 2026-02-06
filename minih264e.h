@@ -428,10 +428,9 @@ typedef struct H264E_persist_tag
         int x;                      // MB x position (in MB's)
         int y;                      // MB y position (in MB's)
         int num;                    // MB number
-        int skip_run;               // Skip run count
 
         // according to table 7-13
-        // -1 = skip, 0 = P16x16, >=6 = I16x16
+        // 0 = P16x16, >=6 = I16x16
         int type;                   // MB type
 
         struct
@@ -444,7 +443,6 @@ typedef struct H264E_persist_tag
         point_t mvd[16];            // Delta-MV for each 4x4 sub-part
         point_t mv[16];             // MV for each 4x4 sub-part
 
-        point_t mv_skip_pred;       // Skip MV predictor
     } mb;
 
     H264E_io_yuv_t ref;             // Current reference picture
@@ -725,20 +723,6 @@ ADJUSTABLE uint16_t g_thr_inter2[] = {
     25853, 23440, 21028, 18615, 16203,
     13790, 11137, 8484, 5832, 3179,
     526, 526,
-};
-
-ADJUSTABLE uint16_t g_skip_thr_inter[52] =
-{
-    45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
-    45, 45, 45, 44, 44,
-    44, 40, 37, 33, 30,
-    26, 32, 38, 45, 51,
-    57, 58, 58, 59, 59,
-    60, 66, 73, 79, 86,
-    92, 95, 98, 100, 103,
-    106, 200, 300, 400, 500,
-    600, 700, 800, 900, 1000,
-    1377, 1377,
 };
 
 ADJUSTABLE uint16_t g_lambda_q4[52] =
@@ -1873,11 +1857,6 @@ static point_t point(int x, int y)
     return p;
 }
 
-static int mv_is_zero(point_t p)
-{
-    return !p.u32;
-}
-
 static int mv_equal(point_t p0, point_t p1)
 {
     return (p0.u32 == p1.u32);
@@ -2273,24 +2252,6 @@ static point_t me_mv_medianpredictor_get(const h264e_enc_t *enc, point_t xy, poi
 }
 
 /**
-*   Motion vector median predictor for skip macroblock
-*/
-static point_t me_mv_medianpredictor_get_skip(h264e_enc_t *enc)
-{
-    point_t pred_16x16 = me_mv_medianpredictor_get(enc, point(0, 0),  point(16, 16));
-    enc->mb.mv_skip_pred = point(0, 0);
-    if (!(~enc->mb.avail & (AVAIL_L | AVAIL_T)))
-    {
-        point_t *mvtop = enc->mv_pred + 8 + enc->mb.x*4;
-        if (!mv_is_zero(enc->mv_pred[0]) && !mv_is_zero(mvtop[0]))
-        {
-            enc->mb.mv_skip_pred = pred_16x16;
-        }
-    }
-    return pred_16x16;
-}
-
-/**
 *   Get starting points candidates for MV search
 */
 static int me_mv_medianpredictor_get_cand(const h264e_enc_t *enc, point_t *mv)
@@ -2528,7 +2489,6 @@ static void encode_slice_header(h264e_enc_t *enc, int frame_type, int pps_id)
 {
     // slice reset
     enc->slice.start_mb_num = enc->mb.num;
-    enc->mb.skip_run = 0;
     memset(enc->nnz, NNZ_NA, (enc->frame.nmbx + 1)*8);    // DF ignore slice borders, but uses it's own nnz's
 
     nal_start(enc, (frame_type == H264E_FRAME_TYPE_KEY ? 5 : 1) | 0x60);
@@ -2581,24 +2541,6 @@ static void mb_write(h264e_enc_t *enc)
         nnz_left[i] = 0;
     }
 
-l_skip:
-    if (enc->mb.type == -1)
-    {
-        // encode skip macroblock
-        assert(enc->slice.type != SLICE_TYPE_I);
-
-        // Increment run count
-        enc->mb.skip_run++;
-
-        // Update predictors
-        *(uint32_t*)(nnz_top + 4) = *(uint32_t*)(nnz_left + 4) = 0; // set chroma NNZ to 0
-        me_mv_medianpredictor_put(enc, 0, 0, 4, 4, enc->mb.mv[0]);
-
-        // Update reference with reconstructed pixels
-        h264e_copy_16x16(enc->dec.yuv[0], enc->dec.stride[0], enc->pbest, 16);
-        h264e_copy_8x8(enc->dec.yuv[1], enc->dec.stride[1], enc->ptest);
-        h264e_copy_8x8(enc->dec.yuv[2], enc->dec.stride[2], enc->ptest + 8);
-    } else
     {
         {
             unsigned nz_mask;
@@ -2669,14 +2611,6 @@ l_skip:
         }
         cbpc = MIN(cbpc, 2);
 
-        // Rollback to skip
-        if (!(enc->mb.type | cbpl | cbpc) && // Inter prediction, all-zero after quantization
-            mv_equal(enc->mb.mv[0], enc->mb.mv_skip_pred)) // MV == MV preditor for skip
-        {
-            enc->mb.type = -1;
-            goto l_skip;
-        }
-
         mb_type = enc->mb.type;
         if (enc->mb.type >= 6)   // intra 16x16
         {
@@ -2693,8 +2627,7 @@ l_skip:
 
         if (enc->slice.type != SLICE_TYPE_I)
         {
-            UE(enc->mb.skip_run);
-            enc->mb.skip_run = 0;
+            UE(0); // mb_skip_run = 0 (no skipped MBs)
         }
 
         UE(mb_type);
@@ -3083,82 +3016,20 @@ static void mv_clusters_update(h264e_enc_t *enc, point_t mv)
 }
 
 /**
-*   Choose inter mode: skip/coded, ME partition, find MV
+*   Choose inter mode: ME partition, find MV
 */
 static void inter_choose_mode(h264e_enc_t *enc)
 {
-    point_t mv_skip, mv_skip_a, mv_cand[MAX_MV_CAND];
-    point_t mv_pred_16x16 = me_mv_medianpredictor_get_skip(enc);
+    point_t mv_cand[MAX_MV_CAND];
+    point_t mv_pred_16x16 = me_mv_medianpredictor_get(enc, point(0, 0), point(16, 16));
     point_t mv_best = point(MV_NA, 0); // avoid warning
 
-    int sad, sad_skip = 0x7FFFFFFF, sad_best = 0x7FFFFFFF;
+    int sad, sad_best = 0x7FFFFFFF;
     int off, j = 0, ncand = 0;
     int cand_sad4[MAX_MV_CAND][4];
     const pix_t *ref_yuv = enc->ref.yuv[0];
     int ref_stride = enc->ref.stride[0];
     int mv_cand_cost_best = 0;
-    mv_skip = enc->mb.mv_skip_pred;
-    mv_skip_a = mb_abs_mv(enc, mv_skip);
-
-    // Try skip mode
-    if (mv_in_rect(mv_skip_a, &enc->frame.mv_limit))
-    {
-        int *sad4 = cand_sad4[0];
-        interpolate_luma(ref_yuv, ref_stride, mv_skip_a, point(16, 16), enc->ptest);
-        sad_skip = h264e_sad_mb_unlaign_8x8(enc->scratch->mb_pix_inp, 16, enc->ptest, sad4);
-
-        if (MAX(MAX(sad4[0], sad4[1]), MAX(sad4[2], sad4[3])) < g_skip_thr_inter[enc->rc.qp])
-        {
-            int uv, sad_uv;
-
-            SWAP(pix_t*, enc->pbest, enc->ptest);
-            enc->mb.type = -1;
-            enc->mb.mv[0] = mv_skip;
-            enc->mb.cost = 0;
-            interpolate_chroma(enc, mv_skip_a);
-
-            // Check that chroma SAD is not too big for the skip
-            for (uv = 1; uv <= 2; uv++)
-            {
-                pix_t *pred = enc->ptest + (uv - 1)*8;
-                pix_t *pix_mb_uv = mb_input_chroma(enc, uv);
-                int inp_stride = enc->inp.stride[uv];
-
-                if (enc->frame.cropping_flag && ((enc->mb.x + 1)*16  > enc->param.width || (enc->mb.y + 1)*16  > enc->param.height))
-                {
-                    // Speculative read beyond frame borders: make local copy of the macroblock.
-                    // TODO: same code used in mb_write() and mb_encode()
-                    pix_copy_cropped_mb(enc->scratch->mb_pix_store, 8, pix_mb_uv, enc->inp.stride[uv],
-                        MIN(8, enc->param.width/2  - enc->mb.x*8),
-                        MIN(8, enc->param.height/2 - enc->mb.y*8));
-                    pix_mb_uv = enc->scratch->mb_pix_store;
-                    inp_stride = 8;
-                }
-
-                sad_uv = h264e_sad_mb_unlaign_wh(pix_mb_uv, inp_stride, pred, point(8, 8));
-                if (sad_uv >= g_skip_thr_inter[enc->rc.qp])
-                {
-                    break;
-                }
-            }
-            if (uv == 3)
-            {
-                return;
-            }
-        }
-
-        //sad_skip += me_mv_cost(mv_skip, mv_pred_16x16, enc->rc.qp);
-
-        // Too big skip SAD. Use skip predictor as a diamond start point candidate
-        mv_best = mv_cand[ncand++] = mv_round_qpel(mv_skip);
-        if (!((mv_skip.s.x | mv_skip.s.y) & 3))
-        {
-            sad_best = sad_skip;//+ me_mv_cost(mv_best, mv_pred_16x16, enc->rc.qp)
-            mv_cand_cost_best = me_mv_cand_cost(mv_skip, mv_pred_16x16, enc->rc.qp);
-            //mv_cand_cost_best = me_mv_cand_cost(mv_skip, point(0,0), enc->rc.qp);
-            j = 1;
-        }
-    }
 
     mv_cand[ncand++] = mv_pred_16x16;
     ncand += me_mv_medianpredictor_get_cand(enc, mv_cand + ncand);
@@ -3244,18 +3115,6 @@ static void inter_choose_mode(h264e_enc_t *enc)
         }
         enc->pbest = pred_best;
         enc->ptest = pred_test;
-
-        if (enc->mb.cost > sad_skip)
-        {
-            enc->mb.type = 0;
-            enc->mb.cost = sad_skip + me_mv_cand_cost(mv_skip, mv_pred_16x16, enc->rc.qp);
-            enc->mb.mv [0] = mv_skip;
-            enc->mb.mvd[0] = mv_sub(mv_skip, mv_pred_16x16);
-
-            assert(mv_in_rect(mv_skip_a, &enc->frame.mv_limit)) ;
-            interpolate_luma(ref_yuv, ref_stride, mv_skip_a, point(16, 16), enc->pbest);
-            interpolate_chroma(enc, mv_skip_a);
-        }
     }
 }
 
@@ -3530,10 +3389,9 @@ static int rc_frame_start(h264e_enc_t *enc, int is_intra)
 /**
 *   Update rate-control state after frame encode
 */
-static void rc_frame_end(h264e_enc_t *enc, int intra_flag, int skip_flag)
+static void rc_frame_end(h264e_enc_t *enc, int intra_flag)
 {
     // 1. Update QP offset adaptive adjustment
-    if (!skip_flag)
     {
         int qp, nmb = enc->frame.nmb;
         // a posterior qp estimation
@@ -3753,11 +3611,6 @@ static void encode_slice(h264e_enc_t *enc, int frame_type, int pps_id)
 
     } while (++enc->mb.y < enc->frame.nmby);
 
-    if (enc->mb.skip_run)
-    {
-        UE(enc->mb.skip_run);
-    }
-
     nal_end(enc);
     for (i = 0, k = 16; i < 3; i++, k = 8)
     {
@@ -3776,7 +3629,7 @@ static int H264E_encode_one(H264E_persist_t *enc, const H264E_run_param_t *opt,
 
     encode_slice(enc, frame_type, pps_id);
 
-    rc_frame_end(enc, is_intra, enc->mb.skip_run == enc->frame.nmb);
+    rc_frame_end(enc, is_intra);
 
     pix_copy_recon_pic_to_ref(enc);
 
