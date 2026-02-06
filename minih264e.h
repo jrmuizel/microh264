@@ -1711,8 +1711,6 @@ loop_enter:
 
 #define NNZ_NA          64
 
-#define MAX_MV_CAND     20
-
 #define STARTCODE_4BYTES 4
 
 /************************************************************************/
@@ -1826,11 +1824,6 @@ static point_t point(int x, int y)
     return p;
 }
 
-static int mv_equal(point_t p0, point_t p1)
-{
-    return (p0.u32 == p1.u32);
-}
-
 static point_t mv_add(point_t a, point_t b)
 {
 #if defined(__arm__)
@@ -1866,10 +1859,6 @@ static int mv_in_rect(point_t p, const rectangle_t *r)
     return (p.s.y >= r->tl.s.y && p.s.y <= r->br.s.y && p.s.x >= r->tl.s.x && p.s.x <= r->br.s.x);
 }
 
-static point_t mv_round_qpel(point_t p)
-{
-    return point((p.s.x + 1) & ~3, (p.s.y + 1) & ~3);
-}
 
 /************************************************************************/
 /*      Misc macroblock helper functions                                */
@@ -2071,27 +2060,6 @@ static point_t me_mv_medianpredictor_get(const h264e_enc_t *enc)
 /**
 *   Get starting points candidates for MV search
 */
-static int me_mv_medianpredictor_get_cand(const h264e_enc_t *enc, point_t *mv)
-{
-    point_t *mv0 = mv;
-    point_t *mvtop = enc->mv_pred + 8 + enc->mb.x*4;
-    int flag = enc->mb.avail;
-    *mv++ = point(0, 0);
-    if ((flag & AVAIL_L) && AVAIL(enc->mv_pred[0]))
-    {
-        *mv++ = enc->mv_pred[0];
-    }
-    if ((flag & AVAIL_T) && AVAIL(mvtop[0]))
-    {
-        *mv++ = mvtop[0];
-    }
-    if ((flag & AVAIL_TR) && AVAIL(mvtop[4]))
-    {
-        *mv++ = mvtop[4];
-    }
-    return (int)(mv - mv0);
-}
-
 
 /************************************************************************/
 /*      NAL encoding                                                    */
@@ -2648,17 +2616,6 @@ static int me_mv_cost(point_t mv, point_t mv_pred, int qp)
 }
 
 /**
-*   RD cost of given MV candidate (TODO)
-*/
-#define me_mv_cand_cost me_mv_cost
-//static int me_mv_cand_cost(point_t mv, point_t mv_pred, int qp)
-//{
-//    int nb = bits_se(mv.s.x - mv_pred.s.x) + bits_se(mv.s.y - mv_pred.s.y);
-//    return MUL_LAMBDA(nb, g_lambda_mv_q4[qp]);
-//}
-
-
-/**
 *   Modified full-pel motion search with small diamond algorithm
 *   note: diamond implemented with small modifications, trading speed for precision
 */
@@ -2793,119 +2750,54 @@ static void me_mv_set_range(point_t *pnt, rectangle_t *range, const rectangle_t 
 /**
 *   Remove duplicates from MV candidates list
 */
-static int me_mv_refine_cand(point_t *p, int n)
-{
-    int i, j, k;
-    p[0] = mv_round_qpel(p[0]);
-    for (j = 1, k = 1; j < n; j++)
-    {
-        point_t mv = mv_round_qpel(p[j]);
-        for (i = 0; i < k; i++)
-        {
-            if (mv_equal(mv, p[i]))
-                break;
-        }
-        if (i == k)
-            p[k++] = mv;
-    }
-    return k;
-}
-
 /**
 *   Choose inter mode: ME partition, find MV
 */
 static void inter_choose_mode(h264e_enc_t *enc)
 {
-    point_t mv_cand[MAX_MV_CAND];
-    point_t mv_pred_16x16 = me_mv_medianpredictor_get(enc);
-    point_t mv_best = point(MV_NA, 0); // avoid warning
-
-    int sad, sad_best = 0x7FFFFFFF;
-    int off, j = 0, ncand = 0;
-    int cand_sad4[MAX_MV_CAND][4];
     const pix_t *ref_yuv = enc->ref.yuv[0];
     int ref_stride = enc->ref.stride[0];
-    int mv_cand_cost_best = 0;
+    point_t wh;
+    pix_t *store = enc->scratch->mb_pix_store;
+    pix_t *pred_best = store, *pred_test = store + 256;
 
-    mv_cand[ncand++] = mv_pred_16x16;
-    ncand += me_mv_medianpredictor_get_cand(enc, mv_cand + ncand);
-
-    if (enc->mb.x <= 0)
+    enc->mb.cost = 0xffffff;
     {
-        mv_cand[ncand++] = point(8*4, 0);
-    }
-    if (enc->mb.y <= 0)
-    {
-        mv_cand[ncand++] = point(0, 8*4);
-    }
+        int part_sad = MUL_LAMBDA(1, g_lambda_q4[enc->rc.qp]);
+        rectangle_t range;
+        pix_t *diamond_out;
+        point_t mv, mv_pred;
+        point_t mvabs;
 
-    assert(ncand <= MAX_MV_CAND);
-    ncand = me_mv_refine_cand(mv_cand, ncand);
+        mv_pred = me_mv_medianpredictor_get(enc);
+        mvabs = mb_abs_mv(enc, mv_pred);
 
-    for (/*j = 0*/; j < ncand; j++)
-    {
-        point_t mv = mb_abs_mv(enc, mv_cand[j]);
-        if (mv_in_rect(mv, &enc->frame.mv_limit))
+        wh.s.x = 16;
+        wh.s.y = 16;
+        me_mv_set_range(&mvabs, &range, &enc->frame.mv_limit, enc->mb.y*16*4);
+
+        part_sad += me_search_diamond(ref_yuv,
+            enc->scratch->mb_pix_inp, ref_stride, &mvabs, &range, enc->rc.qp,
+            mb_abs_mv(enc, mv_pred), 0x7FFFFFFF, wh,
+            store, &diamond_out);
+
+        pred_test = diamond_out;
+        pred_best = (pred_test == store ? store + 256 : store);
+
+        mv = mv_sub(mvabs, point(enc->mb.x*16*4, enc->mb.y*16*4));
+
+        enc->mb.mvd[0] = mv_sub(mv, mv_pred);
+        enc->mb.mv[0] = mv;
+
+        if (part_sad < enc->mb.cost)
         {
-            int mv_cand_cost = me_mv_cand_cost(mv_cand[j], mv_pred_16x16, enc->rc.qp);
-
-            int *sad4 = cand_sad4[j];
-            off = ((mv.s.y + 0) >> 2)*ref_stride + ((mv.s.x + 0) >> 2);
-            sad = h264e_sad_mb_unlaign_8x8(ref_yuv + off, ref_stride, enc->scratch->mb_pix_inp, sad4);
-
-            if (sad + mv_cand_cost < sad_best + mv_cand_cost_best)
-            //if (sad < sad_best)
-            {
-                mv_cand_cost_best = mv_cand_cost;
-                sad_best = sad;
-                mv_best = mv_cand[j];
-            }
+            SWAP(pix_t*, pred_best, pred_test);
+            enc->mb.cost = part_sad;
+            enc->mb.type = 0;
         }
     }
-
-    sad_best += me_mv_cost(mv_best, mv_pred_16x16, enc->rc.qp);
-
-    {
-        point_t wh;
-        pix_t *store = enc->scratch->mb_pix_store;
-        pix_t *pred_best = store, *pred_test = store + 256;
-
-        enc->mb.cost = 0xffffff;
-        {
-            int part_sad = MUL_LAMBDA(1, g_lambda_q4[enc->rc.qp]);
-            rectangle_t range;
-            pix_t *diamond_out;
-            point_t mv, mv_pred, mvabs = mb_abs_mv(enc, mv_best);
-
-            wh.s.x = 16;
-            wh.s.y = 16;
-            me_mv_set_range(&mvabs, &range, &enc->frame.mv_limit, enc->mb.y*16*4);
-
-            mv_pred = me_mv_medianpredictor_get(enc);
-
-            part_sad += me_search_diamond(ref_yuv,
-                enc->scratch->mb_pix_inp, ref_stride, &mvabs, &range, enc->rc.qp,
-                mb_abs_mv(enc, mv_pred), sad_best, wh,
-                store, &diamond_out);
-
-            pred_test = diamond_out;
-            pred_best = (pred_test == store ? store + 256 : store);
-
-            mv = mv_sub(mvabs, point(enc->mb.x*16*4, enc->mb.y*16*4));
-
-            enc->mb.mvd[0] = mv_sub(mv, mv_pred);
-            enc->mb.mv[0] = mv;
-
-            if (part_sad < enc->mb.cost)
-            {
-                SWAP(pix_t*, pred_best, pred_test);
-                enc->mb.cost = part_sad;
-                enc->mb.type = 0;
-            }
-        }
-        enc->pbest = pred_best;
-        enc->ptest = pred_test;
-    }
+    enc->pbest = pred_best;
+    enc->ptest = pred_test;
 }
 
 /************************************************************************/
